@@ -35,12 +35,50 @@ The canonical bundle assembler consumes released artifacts:
 - CMS build archive
 - player installers
 
+This repo also owns the source-protected product export flow:
+
+- `out/<release>/server/`
+- `out/<release>/cms/`
+- `out/<release>/electron/<platform>/`
+
+Notes:
+
+- `server/` and `cms/` exports are direct inputs to the runtime bundle assembler
+- `electron/<platform>/` exports are per-platform distributables for device delivery
+- QA/production bundle assembly still expects `PLAYER_ARTIFACTS_DIR` to contain the Windows and Ubuntu installers you want staged into environment bundles
+
 ## Primary Commands
+
+Product export packaging:
+
+```bash
+bash scripts/export/package-all.sh --release 2026-04-02-r1 --electron-platform linux
+```
+
+Per-product exports:
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1
+bash scripts/export/package-cms.sh --release 2026-04-02-r1
+bash scripts/export/package-electron.sh --release 2026-04-02-r1 --platform linux
+```
 
 Canonical artifact-driven bundle assembly:
 
 ```bash
 bash scripts/bundle/assemble-runtime-bundle.sh <site-name>
+```
+
+Preferred two-step flow:
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1
+bash scripts/export/package-cms.sh --release 2026-04-02-r1
+
+SERVER_PACKAGE_DIR="out/2026-04-02-r1/server" \
+CMS_PACKAGE_DIR="out/2026-04-02-r1/cms" \
+PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/2026-04-02-r1" \
+bash scripts/bundle/assemble-runtime-bundle.sh site-a
 ```
 
 Transition wrapper for a local shared workspace that still contains sibling product repos:
@@ -62,6 +100,7 @@ assets/      Diagrams, templates, and non-product support assets
 
 ## Canonical Runbooks
 
+- product export packaging: `docs/runbooks/product-export-packaging.md`
 - bundle workflow: `docs/runbooks/onprem-bundle-builder.md`
 - QA deployment: `docs/runbooks/onprem-qa-setup.md`
 - production deployment: `docs/runbooks/onprem-production-setup.md`

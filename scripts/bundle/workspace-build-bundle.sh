@@ -12,15 +12,16 @@ This is a transition convenience wrapper for a local workspace that contains:
 - ../signhex-nexus-core
 - ../signage-screen
 
-It builds product artifacts from the sibling repos, then calls the canonical
-artifact-driven assembler:
+It builds the server and CMS export packages from the sibling repos, then calls
+the canonical artifact-driven assembler:
 
   bash scripts/bundle/assemble-runtime-bundle.sh ...
 
 Important:
 - target QA and production machines still receive only runtime bundles
 - the canonical platform workflow is artifact-driven
-- this wrapper still requires Docker because it builds the backend image locally
+- player installers must already exist in PLAYER_ARTIFACTS_DIR
+- this wrapper still requires Docker because it builds the backend and CMS packages locally
 EOF
 }
 
@@ -70,6 +71,9 @@ SERVER_DIR="$WORKSPACE_ROOT/signhex-server"
 CMS_DIR="$WORKSPACE_ROOT/signhex-nexus-core"
 PLAYER_DIR="$WORKSPACE_ROOT/signage-screen"
 ASSEMBLER_SCRIPT="$SCRIPT_DIR/assemble-runtime-bundle.sh"
+EXPORT_DIR="$PLATFORM_ROOT/scripts/export"
+PACKAGE_SERVER_SCRIPT="$EXPORT_DIR/package-server.sh"
+PACKAGE_CMS_SCRIPT="$EXPORT_DIR/package-cms.sh"
 
 require_command() {
   local command_name="$1"
@@ -99,6 +103,7 @@ require_directory "Electron repo" "$PLAYER_DIR"
 
 PLAYER_ARTIFACTS_DIR="${PLAYER_ARTIFACTS_DIR:-$PLAYER_DIR/build}"
 BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-signhex-onprem-api:${SITE_NAME}}"
+EXPORT_RELEASE_ID="${EXPORT_RELEASE_ID:-$SITE_NAME}"
 
 TEMP_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signhex-workspace-bundle.XXXXXX")"
 cleanup_temp_work_dir() {
@@ -106,22 +111,20 @@ cleanup_temp_work_dir() {
 }
 trap cleanup_temp_work_dir EXIT
 
-BACKEND_IMAGE_ARCHIVE="$TEMP_WORK_DIR/${BACKEND_IMAGE_REF//[:\/]/-}.tar"
-CMS_BUNDLE_ARCHIVE="$TEMP_WORK_DIR/signhex-nexus-core-${SITE_NAME}.tgz"
+SERVER_OUTPUT_BASE="$TEMP_WORK_DIR/out"
+SERVER_PACKAGE_DIR="$SERVER_OUTPUT_BASE/$EXPORT_RELEASE_ID/server"
+CMS_PACKAGE_DIR="$SERVER_OUTPUT_BASE/$EXPORT_RELEASE_ID/cms"
 
-echo "Building backend image from $SERVER_DIR ..."
-docker build -t "$BACKEND_IMAGE_REF" "$SERVER_DIR"
-docker save -o "$BACKEND_IMAGE_ARCHIVE" "$BACKEND_IMAGE_REF"
+echo "Building server export package from $SERVER_DIR ..."
+SERVER_REPO_DIR="$SERVER_DIR" \
+OUTPUT_BASE="$SERVER_OUTPUT_BASE" \
+BACKEND_IMAGE_REF="$BACKEND_IMAGE_REF" \
+bash "$PACKAGE_SERVER_SCRIPT" --release "$EXPORT_RELEASE_ID"
 
-echo "Building CMS bundle from $CMS_DIR ..."
-(
-  cd "$CMS_DIR"
-  VITE_API_BASE_URL= \
-  VITE_WS_BASE_URL= \
-  VITE_WS_URL= \
-  npm run build
-)
-tar -czf "$CMS_BUNDLE_ARCHIVE" -C "$CMS_DIR/dist" .
+echo "Building CMS export package from $CMS_DIR ..."
+CMS_REPO_DIR="$CMS_DIR" \
+OUTPUT_BASE="$SERVER_OUTPUT_BASE" \
+bash "$PACKAGE_CMS_SCRIPT" --release "$EXPORT_RELEASE_ID"
 
 ARGS=()
 if [[ "$SKIP_DOCKER" == "true" ]]; then
@@ -130,8 +133,7 @@ fi
 ARGS+=(--profile "$PROFILE" "$SITE_NAME")
 
 echo "Assembling runtime bundle through $ASSEMBLER_SCRIPT ..."
-BACKEND_IMAGE_REF="$BACKEND_IMAGE_REF" \
-BACKEND_IMAGE_ARCHIVE="$BACKEND_IMAGE_ARCHIVE" \
-CMS_BUNDLE_SOURCE="$CMS_BUNDLE_ARCHIVE" \
+SERVER_PACKAGE_DIR="$SERVER_PACKAGE_DIR" \
+CMS_PACKAGE_DIR="$CMS_PACKAGE_DIR" \
 PLAYER_ARTIFACTS_DIR="$PLAYER_ARTIFACTS_DIR" \
 bash "$ASSEMBLER_SCRIPT" "${ARGS[@]}"

@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bash scripts/export/package-server.sh --release <release-id>
+
+Optional environment overrides:
+  SERVER_REPO_DIR=/path/to/signhex-server
+  OUTPUT_BASE=/path/to/signhex-platform/out
+  BACKEND_IMAGE_REF=signhex-server-export:<release-id>
+  POSTGRES_IMAGE=postgres:15-alpine
+  MINIO_IMAGE=minio/minio:latest
+EOF
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLATFORM_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/common.sh"
+
+RELEASE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --release)
+      RELEASE_ID="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$RELEASE_ID" ]]; then
+  usage
+  exit 1
+fi
+
+SERVER_REPO_DIR="${SERVER_REPO_DIR:-$PLATFORM_ROOT/../signhex-server}"
+OUTPUT_BASE="${OUTPUT_BASE:-$PLATFORM_ROOT/out}"
+BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-signhex-server-export:$RELEASE_ID}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:15-alpine}"
+MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
+
+OUTPUT_DIR="$OUTPUT_BASE/$RELEASE_ID/server"
+IMAGES_DIR="$OUTPUT_DIR/images"
+CERTS_DIR="$OUTPUT_DIR/certs"
+
+export_require_command docker
+export_require_directory "Server repo" "$SERVER_REPO_DIR"
+export_require_file "Server Dockerfile" "$SERVER_REPO_DIR/Dockerfile"
+export_require_file "Server env template" "$SERVER_REPO_DIR/.env.example"
+
+export_make_clean_dir "$OUTPUT_DIR"
+mkdir -p "$IMAGES_DIR" "$CERTS_DIR"
+
+BACKEND_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$BACKEND_IMAGE_REF")"
+POSTGRES_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$POSTGRES_IMAGE")"
+MINIO_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$MINIO_IMAGE")"
+
+export_common_log "Building backend image $BACKEND_IMAGE_REF"
+docker build -t "$BACKEND_IMAGE_REF" "$SERVER_REPO_DIR"
+
+export_common_log "Ensuring base images are available"
+docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1 || docker pull "$POSTGRES_IMAGE"
+docker image inspect "$MINIO_IMAGE" >/dev/null 2>&1 || docker pull "$MINIO_IMAGE"
+
+export_common_log "Saving server package images"
+docker save -o "$IMAGES_DIR/$BACKEND_IMAGE_ARCHIVE_NAME" "$BACKEND_IMAGE_REF"
+docker save -o "$IMAGES_DIR/$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
+docker save -o "$IMAGES_DIR/$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+
+cat > "$OUTPUT_DIR/package.env" <<EOF
+PACKAGE_KIND=server
+RELEASE_ID=$RELEASE_ID
+SERVER_PACKAGE_BACKEND_IMAGE_REF=$BACKEND_IMAGE_REF
+SERVER_PACKAGE_BACKEND_IMAGE_ARCHIVE=images/$BACKEND_IMAGE_ARCHIVE_NAME
+SERVER_PACKAGE_POSTGRES_IMAGE_REF=$POSTGRES_IMAGE
+SERVER_PACKAGE_POSTGRES_IMAGE_ARCHIVE=images/$POSTGRES_IMAGE_ARCHIVE_NAME
+SERVER_PACKAGE_MINIO_IMAGE_REF=$MINIO_IMAGE
+SERVER_PACKAGE_MINIO_IMAGE_ARCHIVE=images/$MINIO_IMAGE_ARCHIVE_NAME
+EOF
+
+{
+  printf 'BACKEND_IMAGE=%s\n' "$BACKEND_IMAGE_REF"
+  printf 'POSTGRES_IMAGE=%s\n' "$POSTGRES_IMAGE"
+  printf 'MINIO_IMAGE=%s\n\n' "$MINIO_IMAGE"
+  cat "$SERVER_REPO_DIR/.env.example"
+} > "$OUTPUT_DIR/.env.template"
+
+cat > "$OUTPUT_DIR/docker-compose.yml" <<'EOF'
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - signhex_server_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: ${MINIO_IMAGE}
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - signhex_server_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      HEXMON_RUNTIME_CONTAINER: "true"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    ports:
+      - "${API_HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm start
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/v1/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  signhex_server_postgres_data:
+  signhex_server_minio_data:
+EOF
+
+export_write_load_images_script "$OUTPUT_DIR/load-images.sh"
+
+cat > "$OUTPUT_DIR/init-env.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! -f ".env" ]]; then
+  cp .env.template .env
+  echo "Created .env from .env.template"
+else
+  echo ".env already exists"
+fi
+
+mkdir -p certs
+echo "Ensure certs/ca.crt exists before starting the stack."
+EOF
+
+cat > "$OUTPUT_DIR/start.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -f ".env" ]] || { echo ".env is missing. Run ./init-env.sh first." >&2; exit 1; }
+[[ -f "certs/ca.crt" ]] || { echo "certs/ca.crt is missing." >&2; exit 1; }
+
+docker compose --env-file .env up -d
+EOF
+
+cat > "$OUTPUT_DIR/stop.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -f ".env" ]] || { echo ".env is missing." >&2; exit 1; }
+docker compose --env-file .env down
+EOF
+
+cat > "$OUTPUT_DIR/update.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -f ".env" ]] || { echo ".env is missing. Copy it from the previous release or run ./init-env.sh." >&2; exit 1; }
+[[ -f "certs/ca.crt" ]] || { echo "certs/ca.crt is missing." >&2; exit 1; }
+
+docker compose --env-file .env up -d --remove-orphans
+EOF
+
+cat > "$OUTPUT_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -f ".env" ]] || { echo ".env is missing." >&2; exit 1; }
+source ./.env
+
+docker compose --env-file .env exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT:-9000}/minio/health/live" >/dev/null
+curl -fsS "http://127.0.0.1:${API_HOST_PORT:-3000}/api/v1/health" >/dev/null
+echo "Server package healthy."
+EOF
+
+cat > "$CERTS_DIR/README.md" <<'EOF'
+# Runtime Certs
+
+Place the pairing CA file here before starting the stack:
+
+- `ca.crt`
+
+Do not commit real certificates into source control.
+EOF
+
+cat > "$OUTPUT_DIR/README.md" <<EOF
+# Signhex Server Package
+
+This folder is a source-free server deploy package.
+
+## First-time setup
+
+\`\`\`bash
+./init-env.sh
+# edit .env
+# place certs/ca.crt
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Update
+
+\`\`\`bash
+# copy the existing .env into this folder
+# copy certs/ca.crt into this folder
+./load-images.sh
+./update.sh
+./health-check.sh
+\`\`\`
+
+## Persistent data
+
+PostgreSQL and MinIO data are stored in Docker named volumes:
+
+- \`signhex_server_postgres_data\`
+- \`signhex_server_minio_data\`
+EOF
+
+chmod +x \
+  "$OUTPUT_DIR/load-images.sh" \
+  "$OUTPUT_DIR/init-env.sh" \
+  "$OUTPUT_DIR/start.sh" \
+  "$OUTPUT_DIR/stop.sh" \
+  "$OUTPUT_DIR/update.sh" \
+  "$OUTPUT_DIR/health-check.sh"
+
+export_write_checksums "$OUTPUT_DIR"
+export_common_log "Server package created at $OUTPUT_DIR"

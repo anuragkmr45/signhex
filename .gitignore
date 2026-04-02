@@ -1,4 +1,5 @@
 dist/
+out/
 *.tar
 *.tgz
 *.zip

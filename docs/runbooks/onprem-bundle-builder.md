@@ -7,10 +7,24 @@ Start here for platform bundle generation.
 
 The canonical workflow is artifact-driven:
 
-- backend image archive in
-- CMS build archive in
+- server package in or backend image archive in
+- CMS package in or CMS build archive in
 - player installers in
 - runtime bundle out
+
+Preferred inputs can come from product export packages:
+
+- `out/<release>/server/`
+- `out/<release>/cms/`
+
+The server and CMS package folders are direct inputs to the assembler through:
+
+- `SERVER_PACKAGE_DIR`
+- `CMS_PACKAGE_DIR`
+
+Player artifacts are still staged through one directory:
+
+- `PLAYER_ARTIFACTS_DIR`
 
 Target QA and production machines receive only generated runtime folders, image archives, configs, and start scripts.
 
@@ -25,15 +39,19 @@ bash scripts/bundle/assemble-runtime-bundle.sh <site-name>
 Default behavior:
 
 - generates both `qa/` and `production/`
-- consumes released backend, CMS, and player artifacts
+- consumes released backend, CMS, and player artifacts or the generated server/CMS package folders
 - stages runtime-only QA and production folders
 - writes `SHA256SUMS.txt`, `verify-bundle.sh`, and `BUNDLE_OVERVIEW.md`
 
 ## Required Artifact Inputs
 
-- `BACKEND_IMAGE_REF`
-- `BACKEND_IMAGE_ARCHIVE`
-- `CMS_BUNDLE_SOURCE`
+- preferred:
+  - `SERVER_PACKAGE_DIR`
+  - `CMS_PACKAGE_DIR`
+- fallback:
+  - `BACKEND_IMAGE_REF`
+  - `BACKEND_IMAGE_ARCHIVE`
+  - `CMS_BUNDLE_SOURCE`
 - `PLAYER_ARTIFACTS_DIR`
 
 `CMS_BUNDLE_SOURCE` may be:
@@ -46,6 +64,8 @@ Default behavior:
 - one Windows `.exe`
 - one Ubuntu `.deb`
 - optional Ubuntu `.AppImage`
+
+The per-platform export folders under `out/<release>/electron/<platform>/` are for direct device delivery. If you want to stage player installers into QA or production bundles, collect the Windows and Ubuntu installers into one `PLAYER_ARTIFACTS_DIR`.
 
 ## Required Environment Inputs
 
@@ -75,6 +95,26 @@ bash scripts/bundle/assemble-runtime-bundle.sh --skip-docker <site-name>
 Do not deploy a bundle that contains `*.SKIPPED.txt`.
 
 ## Example
+
+Preferred example using product export packages:
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1
+bash scripts/export/package-cms.sh --release 2026-04-02-r1
+
+QA_HOST=10.30.0.40 \
+CMS_PUBLIC_SCHEME=https \
+CMS_PUBLIC_HOST=10.20.0.30 \
+BACKEND_PRIVATE_HOST=10.20.0.20 \
+BACKEND_DEVICE_HOST=10.20.0.21 \
+DATA_PRIVATE_HOST=10.20.0.10 \
+SERVER_PACKAGE_DIR=out/2026-04-02-r1/server \
+CMS_PACKAGE_DIR=out/2026-04-02-r1/cms \
+PLAYER_ARTIFACTS_DIR=/artifacts/signage-screen/1.2.3 \
+bash scripts/bundle/assemble-runtime-bundle.sh site-a
+```
+
+Fallback example using raw released artifacts:
 
 ```bash
 QA_HOST=10.30.0.40 \

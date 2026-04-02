@@ -8,6 +8,12 @@ Use this guide when you need to deploy the source-free production bundle generat
 bash scripts/bundle/assemble-runtime-bundle.sh <site-name>
 ```
 
+Preferred build flow:
+
+1. generate `server/` and `cms/` product exports from `docs/runbooks/product-export-packaging.md`
+2. gather the required player installers into `PLAYER_ARTIFACTS_DIR`
+3. assemble the production runtime bundle from those inputs
+
 This guide assumes:
 
 - no DNS
@@ -44,11 +50,17 @@ Collect these before you build the bundle:
 - `BACKEND_PRIVATE_HOST`
 - `BACKEND_DEVICE_HOST`
 - `DATA_PRIVATE_HOST`
-- `BACKEND_IMAGE_REF`
-- `BACKEND_IMAGE_ARCHIVE`
-- `CMS_BUNDLE_SOURCE`
+- preferred:
+  - `SERVER_PACKAGE_DIR`
+  - `CMS_PACKAGE_DIR`
+- fallback:
+  - `BACKEND_IMAGE_REF`
+  - `BACKEND_IMAGE_ARCHIVE`
+  - `CMS_BUNDLE_SOURCE`
 - `PLAYER_ARTIFACTS_DIR`
 - optional provided cert files if you are not using generated CMS TLS
+
+`PLAYER_ARTIFACTS_DIR` must contain the Windows and Ubuntu player installers to stage into `production/electron/`.
 
 ### Required tools on the build machine
 
@@ -76,22 +88,43 @@ Failure hint:
 
 - if Docker is unavailable, do not build a deployment bundle from that machine
 
-## 2. Build The Production Bundle
+## 2. Build Or Gather Product Packages
+
+Preferred build-machine flow:
+
+```bash
+export RELEASE_ID="2026-04-02-r1"
+
+bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-cms.sh --release "$RELEASE_ID"
+```
+
+Expected result:
+
+- `out/$RELEASE_ID/server/`
+- `out/$RELEASE_ID/cms/`
+
+Player installer note:
+
+- gather the Windows `.exe` and Ubuntu `.deb` into one `PLAYER_ARTIFACTS_DIR`
+- the per-platform `electron/<platform>/` exports are for direct device delivery, not a combined production bundle input by themselves
+
+## 3. Build The Production Bundle
 
 ### Recommended command
 
 Run on the build machine from the repo root:
 
 ```bash
+export RELEASE_ID="2026-04-02-r1"
 export SITE_NAME="site-a"
 export CMS_PUBLIC_SCHEME="https"
 export CMS_PUBLIC_HOST="10.20.0.30"
 export BACKEND_PRIVATE_HOST="10.20.0.20"
 export BACKEND_DEVICE_HOST="10.20.0.21"
 export DATA_PRIVATE_HOST="10.20.0.10"
-export BACKEND_IMAGE_REF="ghcr.io/hexmon/signhex-server:1.2.3"
-export BACKEND_IMAGE_ARCHIVE="/artifacts/signhex-server-1.2.3.tar"
-export CMS_BUNDLE_SOURCE="/artifacts/signhex-nexus-core-1.2.3.tgz"
+export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"
+export CMS_PACKAGE_DIR="out/${RELEASE_ID}/cms"
 export PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/1.2.3"
 export ONPREM_CERT_MODE="generate"
 
@@ -111,7 +144,7 @@ Expected result:
 
 Failure hint:
 
-- if the command says required artifacts are missing, verify `BACKEND_IMAGE_ARCHIVE`, `CMS_BUNDLE_SOURCE`, and `PLAYER_ARTIFACTS_DIR`
+- if the command says required artifacts are missing, verify `SERVER_PACKAGE_DIR`, `CMS_PACKAGE_DIR`, and `PLAYER_ARTIFACTS_DIR`
 
 ### When to use the default `all` profile
 
@@ -127,7 +160,7 @@ The generated production runbook still lives at:
 dist/onprem/<site-name>/production/PRODUCTION_SETUP_GUIDE.md
 ```
 
-## 3. Check The Bundle Before Copying It
+## 4. Check The Bundle Before Copying It
 
 Run:
 
@@ -154,7 +187,7 @@ Failure hint:
 
 - if you see `*.SKIPPED.txt`, the bundle was built with `--skip-docker` and is not deployment-ready
 
-## 4. Copy The Runtime Folders To The Target Guests
+## 5. Copy The Runtime Folders To The Target Guests
 
 Choose a release ID:
 
@@ -194,7 +227,7 @@ ssh "${DEPLOY_USER}@${BACKEND_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/rele
 ssh "${DEPLOY_USER}@${CMS_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID} /opt/signhex/${SITE_NAME} && ln -sfn /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/cms /opt/signhex/${SITE_NAME}/current"
 ```
 
-## 5. Start Each Tier
+## 6. Start Each Tier
 
 ### Data VM
 
@@ -251,7 +284,7 @@ Expected result:
 - HTTP redirects to HTTPS
 - HTTPS loads
 
-## 6. Post-Deploy Validation
+## 7. Post-Deploy Validation
 
 ### Browser checks
 
@@ -305,7 +338,7 @@ Minimum validation:
 - pair the device
 - confirm the screen appears in CMS
 
-## 7. Routine Operations
+## 8. Routine Operations
 
 ### Restart a tier
 
@@ -359,7 +392,7 @@ Use:
 - `backend` on the Backend VM
 - `cms` on the CMS guest
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### CMS loads but API calls fail
 
@@ -402,20 +435,23 @@ If any files are found:
 
 - rebuild without `--skip-docker`
 
-## 9. Production Quick Start
+## 10. Production Quick Start
 
 Use this if you already understand the topology and just need the minimum steps.
 
 ```bash
+export RELEASE_ID="2026-04-02-r1"
 export SITE_NAME="site-a"
 export CMS_PUBLIC_SCHEME="https"
 export CMS_PUBLIC_HOST="10.20.0.30"
 export BACKEND_PRIVATE_HOST="10.20.0.20"
 export BACKEND_DEVICE_HOST="10.20.0.21"
 export DATA_PRIVATE_HOST="10.20.0.10"
-export BACKEND_IMAGE_REF="ghcr.io/hexmon/signhex-server:1.2.3"
-export BACKEND_IMAGE_ARCHIVE="/artifacts/signhex-server-1.2.3.tar"
-export CMS_BUNDLE_SOURCE="/artifacts/signhex-nexus-core-1.2.3.tgz"
+bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-cms.sh --release "$RELEASE_ID"
+
+export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"
+export CMS_PACKAGE_DIR="out/${RELEASE_ID}/cms"
 export PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/1.2.3"
 export ONPREM_CERT_MODE="generate"
 

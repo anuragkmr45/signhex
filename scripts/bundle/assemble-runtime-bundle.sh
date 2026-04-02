@@ -29,6 +29,8 @@ Required environment inputs:
   DATA_PRIVATE_HOST=10.20.0.10                # required for profile all|production
 
 Optional operational inputs:
+  SERVER_PACKAGE_DIR=/path/to/out/<release>/server
+  CMS_PACKAGE_DIR=/path/to/out/<release>/cms
   PLATFORM_ENV_FILE=/path/to/platform.env
   OUTPUT_BASE=/path/to/output/root            # defaults to ./dist/onprem
   ONPREM_CERT_MODE=generate|provided
@@ -172,6 +174,15 @@ require_command() {
   local command_name="$1"
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "$command_name is required on the build machine." >&2
+    exit 1
+  fi
+}
+
+require_directory() {
+  local label="$1"
+  local directory="$2"
+  if [[ -z "$directory" || ! -d "$directory" ]]; then
+    echo "$label directory not found: $directory" >&2
     exit 1
   fi
 }
@@ -347,6 +358,21 @@ if [[ -n "$PLATFORM_ENV_FILE" ]]; then
   load_env_file "$PLATFORM_ENV_FILE"
 fi
 
+SERVER_PACKAGE_DIR="${SERVER_PACKAGE_DIR:-}"
+CMS_PACKAGE_DIR="${CMS_PACKAGE_DIR:-}"
+
+if [[ -n "$SERVER_PACKAGE_DIR" ]]; then
+  require_directory "SERVER_PACKAGE_DIR" "$SERVER_PACKAGE_DIR"
+  require_file "SERVER_PACKAGE_DIR/package.env" "$SERVER_PACKAGE_DIR/package.env"
+  load_env_file "$SERVER_PACKAGE_DIR/package.env"
+fi
+
+if [[ -n "$CMS_PACKAGE_DIR" ]]; then
+  require_directory "CMS_PACKAGE_DIR" "$CMS_PACKAGE_DIR"
+  require_file "CMS_PACKAGE_DIR/package.env" "$CMS_PACKAGE_DIR/package.env"
+  load_env_file "$CMS_PACKAGE_DIR/package.env"
+fi
+
 QA_HOST="${QA_HOST:-}"
 CMS_PUBLIC_SCHEME="${CMS_PUBLIC_SCHEME:-https}"
 CMS_PUBLIC_HOST="${CMS_PUBLIC_HOST:-}"
@@ -354,9 +380,17 @@ BACKEND_PRIVATE_HOST="${BACKEND_PRIVATE_HOST:-}"
 BACKEND_DEVICE_HOST="${BACKEND_DEVICE_HOST:-$BACKEND_PRIVATE_HOST}"
 DATA_PRIVATE_HOST="${DATA_PRIVATE_HOST:-}"
 
-BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-}"
+BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-${SERVER_PACKAGE_BACKEND_IMAGE_REF:-}}"
 BACKEND_IMAGE_ARCHIVE="${BACKEND_IMAGE_ARCHIVE:-}"
+if [[ -z "$BACKEND_IMAGE_ARCHIVE" && -n "$SERVER_PACKAGE_DIR" && -n "${SERVER_PACKAGE_BACKEND_IMAGE_ARCHIVE:-}" ]]; then
+  BACKEND_IMAGE_ARCHIVE="$SERVER_PACKAGE_DIR/${SERVER_PACKAGE_BACKEND_IMAGE_ARCHIVE}"
+fi
+
 CMS_BUNDLE_SOURCE="${CMS_BUNDLE_SOURCE:-}"
+if [[ -z "$CMS_BUNDLE_SOURCE" && -n "$CMS_PACKAGE_DIR" && -n "${CMS_PACKAGE_WWW_DIR:-}" ]]; then
+  CMS_BUNDLE_SOURCE="$CMS_PACKAGE_DIR/${CMS_PACKAGE_WWW_DIR}"
+fi
+
 PLAYER_ARTIFACTS_DIR="${PLAYER_ARTIFACTS_DIR:-}"
 
 QA_CMS_HTTP_PORT="${QA_CMS_HTTP_PORT:-80}"
@@ -377,9 +411,22 @@ CMS_TLS_KEY_FILE="${CMS_TLS_KEY_FILE:-}"
 ONPREM_CERT_MODE="${ONPREM_CERT_MODE:-generate}"
 ONPREM_BACKEND_CA_FILE="${ONPREM_BACKEND_CA_FILE:-}"
 
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:15-alpine}"
-MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
-NGINX_IMAGE="${NGINX_IMAGE:-nginx:1.27-alpine}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-${SERVER_PACKAGE_POSTGRES_IMAGE_REF:-postgres:15-alpine}}"
+MINIO_IMAGE="${MINIO_IMAGE:-${SERVER_PACKAGE_MINIO_IMAGE_REF:-minio/minio:latest}}"
+NGINX_IMAGE="${NGINX_IMAGE:-${CMS_PACKAGE_NGINX_IMAGE_REF:-nginx:1.27-alpine}}"
+
+POSTGRES_PACKAGE_ARCHIVE=""
+MINIO_PACKAGE_ARCHIVE=""
+NGINX_PACKAGE_ARCHIVE=""
+if [[ -n "$SERVER_PACKAGE_DIR" && -n "${SERVER_PACKAGE_POSTGRES_IMAGE_ARCHIVE:-}" ]]; then
+  POSTGRES_PACKAGE_ARCHIVE="$SERVER_PACKAGE_DIR/${SERVER_PACKAGE_POSTGRES_IMAGE_ARCHIVE}"
+fi
+if [[ -n "$SERVER_PACKAGE_DIR" && -n "${SERVER_PACKAGE_MINIO_IMAGE_ARCHIVE:-}" ]]; then
+  MINIO_PACKAGE_ARCHIVE="$SERVER_PACKAGE_DIR/${SERVER_PACKAGE_MINIO_IMAGE_ARCHIVE}"
+fi
+if [[ -n "$CMS_PACKAGE_DIR" && -n "${CMS_PACKAGE_NGINX_IMAGE_ARCHIVE:-}" ]]; then
+  NGINX_PACKAGE_ARCHIVE="$CMS_PACKAGE_DIR/${CMS_PACKAGE_NGINX_IMAGE_ARCHIVE}"
+fi
 
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
@@ -437,15 +484,23 @@ fi
 require_command openssl
 require_command tar
 
-if [[ "$SKIP_DOCKER" != "true" ]]; then
-  require_command docker
-fi
-
 if [[ -z "$BACKEND_IMAGE_REF" ]]; then
   echo "BACKEND_IMAGE_REF is required." >&2
   exit 1
 fi
 require_file "BACKEND_IMAGE_ARCHIVE" "$BACKEND_IMAGE_ARCHIVE"
+
+if [[ -n "$POSTGRES_PACKAGE_ARCHIVE" ]]; then
+  require_file "POSTGRES_PACKAGE_ARCHIVE" "$POSTGRES_PACKAGE_ARCHIVE"
+fi
+
+if [[ -n "$MINIO_PACKAGE_ARCHIVE" ]]; then
+  require_file "MINIO_PACKAGE_ARCHIVE" "$MINIO_PACKAGE_ARCHIVE"
+fi
+
+if [[ -n "$NGINX_PACKAGE_ARCHIVE" ]]; then
+  require_file "NGINX_PACKAGE_ARCHIVE" "$NGINX_PACKAGE_ARCHIVE"
+fi
 
 if [[ -z "$CMS_BUNDLE_SOURCE" || (! -f "$CMS_BUNDLE_SOURCE" && ! -d "$CMS_BUNDLE_SOURCE") ]]; then
   echo "CMS_BUNDLE_SOURCE must point to a CMS dist directory or a tar-compatible archive." >&2
@@ -513,13 +568,24 @@ if profile_enabled production; then
 fi
 
 BACKEND_IMAGE_ARCHIVE_NAME="$(basename "$BACKEND_IMAGE_ARCHIVE")"
-POSTGRES_IMAGE_ARCHIVE_NAME="${POSTGRES_IMAGE//[:\/]/-}.tar"
-MINIO_IMAGE_ARCHIVE_NAME="${MINIO_IMAGE//[:\/]/-}.tar"
-NGINX_IMAGE_ARCHIVE_NAME="${NGINX_IMAGE//[:\/]/-}.tar"
+POSTGRES_IMAGE_ARCHIVE_NAME="$(basename "${POSTGRES_PACKAGE_ARCHIVE:-${POSTGRES_IMAGE//[:\/]/-}.tar}")"
+MINIO_IMAGE_ARCHIVE_NAME="$(basename "${MINIO_PACKAGE_ARCHIVE:-${MINIO_IMAGE//[:\/]/-}.tar}")"
+NGINX_IMAGE_ARCHIVE_NAME="$(basename "${NGINX_PACKAGE_ARCHIVE:-${NGINX_IMAGE//[:\/]/-}.tar}")"
 
 POSTGRES_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$POSTGRES_IMAGE_ARCHIVE_NAME"
 MINIO_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$MINIO_IMAGE_ARCHIVE_NAME"
 NGINX_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$NGINX_IMAGE_ARCHIVE_NAME"
+
+DOCKER_REQUIRED="false"
+if [[ "$SKIP_DOCKER" != "true" ]]; then
+  if [[ -z "$POSTGRES_PACKAGE_ARCHIVE" || -z "$MINIO_PACKAGE_ARCHIVE" || -z "$NGINX_PACKAGE_ARCHIVE" ]]; then
+    DOCKER_REQUIRED="true"
+  fi
+fi
+
+if [[ "$DOCKER_REQUIRED" == "true" ]]; then
+  require_command docker
+fi
 
 if profile_enabled qa; then
   copy_archive_to_targets "$BACKEND_IMAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
@@ -529,38 +595,80 @@ if profile_enabled production; then
   copy_archive_to_targets "$BACKEND_IMAGE_ARCHIVE" "$PROD_BACKEND_DIR/images"
 fi
 
-if [[ "$SKIP_DOCKER" == "true" ]]; then
-  echo "Skipping base image pull/export for postgres, minio, and nginx. Writing placeholders only."
+if [[ -n "$POSTGRES_PACKAGE_ARCHIVE" ]]; then
+  if profile_enabled qa; then
+    copy_archive_to_targets "$POSTGRES_PACKAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
+  fi
+  if profile_enabled production; then
+    copy_archive_to_targets "$POSTGRES_PACKAGE_ARCHIVE" "$PROD_DATA_DIR/images"
+  fi
+elif [[ "$SKIP_DOCKER" == "true" ]]; then
   if profile_enabled qa; then
     write_skip_placeholder "$QA_BACKEND_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
-    write_skip_placeholder "$QA_BACKEND_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
-    write_skip_placeholder "$QA_CMS_DIR/images" "$NGINX_IMAGE_ARCHIVE_NAME" "$NGINX_IMAGE"
   fi
   if profile_enabled production; then
     write_skip_placeholder "$PROD_DATA_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
+  fi
+else
+  echo "Preparing base image: $POSTGRES_IMAGE"
+  docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1 || docker pull "$POSTGRES_IMAGE"
+  docker save -o "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$POSTGRES_IMAGE"
+  if profile_enabled qa; then
+    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+  fi
+  if profile_enabled production; then
+    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
+  fi
+fi
+
+if [[ -n "$MINIO_PACKAGE_ARCHIVE" ]]; then
+  if profile_enabled qa; then
+    copy_archive_to_targets "$MINIO_PACKAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
+  fi
+  if profile_enabled production; then
+    copy_archive_to_targets "$MINIO_PACKAGE_ARCHIVE" "$PROD_DATA_DIR/images"
+  fi
+elif [[ "$SKIP_DOCKER" == "true" ]]; then
+  if profile_enabled qa; then
+    write_skip_placeholder "$QA_BACKEND_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+  fi
+  if profile_enabled production; then
     write_skip_placeholder "$PROD_DATA_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+  fi
+else
+  echo "Preparing base image: $MINIO_IMAGE"
+  docker image inspect "$MINIO_IMAGE" >/dev/null 2>&1 || docker pull "$MINIO_IMAGE"
+  docker save -o "$MINIO_IMAGE_ARCHIVE_TEMP" "$MINIO_IMAGE"
+  if profile_enabled qa; then
+    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+  fi
+  if profile_enabled production; then
+    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
+  fi
+fi
+
+if [[ -n "$NGINX_PACKAGE_ARCHIVE" ]]; then
+  if profile_enabled qa; then
+    copy_archive_to_targets "$NGINX_PACKAGE_ARCHIVE" "$QA_CMS_DIR/images"
+  fi
+  if profile_enabled production; then
+    copy_archive_to_targets "$NGINX_PACKAGE_ARCHIVE" "$PROD_CMS_DIR/images"
+  fi
+elif [[ "$SKIP_DOCKER" == "true" ]]; then
+  if profile_enabled qa; then
+    write_skip_placeholder "$QA_CMS_DIR/images" "$NGINX_IMAGE_ARCHIVE_NAME" "$NGINX_IMAGE"
+  fi
+  if profile_enabled production; then
     write_skip_placeholder "$PROD_CMS_DIR/images" "$NGINX_IMAGE_ARCHIVE_NAME" "$NGINX_IMAGE"
   fi
 else
-  echo "Preparing base images..."
-  docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1 || docker pull "$POSTGRES_IMAGE"
-  docker image inspect "$MINIO_IMAGE" >/dev/null 2>&1 || docker pull "$MINIO_IMAGE"
+  echo "Preparing base image: $NGINX_IMAGE"
   docker image inspect "$NGINX_IMAGE" >/dev/null 2>&1 || docker pull "$NGINX_IMAGE"
-
-  echo "Saving base images..."
-  docker save -o "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$POSTGRES_IMAGE"
-  docker save -o "$MINIO_IMAGE_ARCHIVE_TEMP" "$MINIO_IMAGE"
   docker save -o "$NGINX_IMAGE_ARCHIVE_TEMP" "$NGINX_IMAGE"
-
   if profile_enabled qa; then
-    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
-    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
     copy_archive_to_targets "$NGINX_IMAGE_ARCHIVE_TEMP" "$QA_CMS_DIR/images"
   fi
-
   if profile_enabled production; then
-    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
-    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
     copy_archive_to_targets "$NGINX_IMAGE_ARCHIVE_TEMP" "$PROD_CMS_DIR/images"
   fi
 fi
@@ -1198,6 +1306,8 @@ This bundle was assembled from released runtime artifacts. Do not copy the sourc
 
 ## Product inputs
 
+- Server package dir: \`${SERVER_PACKAGE_DIR:-not provided}\`
+- CMS package dir: \`${CMS_PACKAGE_DIR:-not provided}\`
 - Backend image ref: \`$BACKEND_IMAGE_REF\`
 - Backend image archive: \`$(basename "$BACKEND_IMAGE_ARCHIVE")\`
 - CMS bundle source: \`$(basename "$CMS_BUNDLE_SOURCE")\`

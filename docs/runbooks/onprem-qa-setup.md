@@ -9,6 +9,12 @@ Use this guide when you need a source-free QA deployment with:
 - CMS served at `http://<qa-ip>`
 - player devices pointing directly to `http://<qa-ip>:3000`
 
+Preferred build flow:
+
+1. generate `server/` and `cms/` product exports from `docs/runbooks/product-export-packaging.md`
+2. gather the required player installers into `PLAYER_ARTIFACTS_DIR`
+3. assemble the QA runtime bundle from those inputs
+
 Generated QA bundle layout:
 
 - `qa/backend/`
@@ -21,10 +27,16 @@ Generated QA bundle layout:
 
 - `SITE_NAME`
 - `QA_HOST`
-- `BACKEND_IMAGE_REF`
-- `BACKEND_IMAGE_ARCHIVE`
-- `CMS_BUNDLE_SOURCE`
+- preferred:
+  - `SERVER_PACKAGE_DIR`
+  - `CMS_PACKAGE_DIR`
+- fallback:
+  - `BACKEND_IMAGE_REF`
+  - `BACKEND_IMAGE_ARCHIVE`
+  - `CMS_BUNDLE_SOURCE`
 - `PLAYER_ARTIFACTS_DIR`
+
+`PLAYER_ARTIFACTS_DIR` must contain the Windows and Ubuntu player installers to stage into `qa/electron/`.
 
 ### Required tools on the build machine
 
@@ -41,16 +53,37 @@ Expected result:
 
 - Docker, tar, openssl, and the bundle help output are all available
 
-## 2. Build The QA Bundle
+## 2. Build Or Gather Product Packages
+
+Preferred build-machine flow:
+
+```bash
+export RELEASE_ID="2026-04-02-r1"
+
+bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-cms.sh --release "$RELEASE_ID"
+```
+
+Expected result:
+
+- `out/$RELEASE_ID/server/`
+- `out/$RELEASE_ID/cms/`
+
+Player installer note:
+
+- gather the Windows `.exe` and Ubuntu `.deb` into one `PLAYER_ARTIFACTS_DIR`
+- the per-platform `electron/<platform>/` exports are for direct device delivery, not a combined QA bundle input by themselves
+
+## 3. Build The QA Bundle
 
 Run on the build machine:
 
 ```bash
 export SITE_NAME="site-a-qa"
+export RELEASE_ID="2026-04-02-r1"
 export QA_HOST="10.30.0.40"
-export BACKEND_IMAGE_REF="ghcr.io/hexmon/signhex-server:1.2.3"
-export BACKEND_IMAGE_ARCHIVE="/artifacts/signhex-server-1.2.3.tar"
-export CMS_BUNDLE_SOURCE="/artifacts/signhex-nexus-core-1.2.3.tgz"
+export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"
+export CMS_PACKAGE_DIR="out/${RELEASE_ID}/cms"
 export PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/1.2.3"
 
 bash scripts/bundle/assemble-runtime-bundle.sh --profile qa "$SITE_NAME"
@@ -68,9 +101,9 @@ Expected result:
 
 Failure hint:
 
-- if the command says required artifacts are missing, verify `BACKEND_IMAGE_ARCHIVE`, `CMS_BUNDLE_SOURCE`, and `PLAYER_ARTIFACTS_DIR`
+- if the command says required artifacts are missing, verify `SERVER_PACKAGE_DIR`, `CMS_PACKAGE_DIR`, and `PLAYER_ARTIFACTS_DIR`
 
-## 3. Check The QA Bundle
+## 4. Check The QA Bundle
 
 Run:
 
@@ -88,7 +121,7 @@ Expected result:
   - `qa/cms/`
   - `qa/electron/`
 
-## 4. Copy The QA Runtime Folders
+## 5. Copy The QA Runtime Folders
 
 Choose a release ID and target host:
 
@@ -113,7 +146,7 @@ Expected result:
 
 - no repository checkout is needed on the QA machine
 
-## 5. Start The QA Services
+## 6. Start The QA Services
 
 ### Start backend + PostgreSQL + MinIO
 
@@ -150,7 +183,7 @@ Expected result:
 - CMS loads over HTTP
 - same-origin proxying to backend works
 
-## 6. QA Validation
+## 7. QA Validation
 
 Open:
 
@@ -165,7 +198,7 @@ Confirm:
 - API calls succeed through the same origin
 - socket-driven UI areas connect
 
-## 7. Player Handoff For QA
+## 8. Player Handoff For QA
 
 Give the device team:
 
@@ -181,7 +214,7 @@ Minimum workflow:
 4. Pair the device against `http://<qa-ip>:3000`
 5. Confirm the device appears in the QA CMS
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### CMS loads but API calls fail
 
@@ -226,14 +259,17 @@ If any files are found:
 
 - rebuild without `--skip-docker`
 
-## 9. QA Quick Start
+## 10. QA Quick Start
 
 ```bash
+export RELEASE_ID="2026-04-02-r1"
 export SITE_NAME="site-a-qa"
 export QA_HOST="10.30.0.40"
-export BACKEND_IMAGE_REF="ghcr.io/hexmon/signhex-server:1.2.3"
-export BACKEND_IMAGE_ARCHIVE="/artifacts/signhex-server-1.2.3.tar"
-export CMS_BUNDLE_SOURCE="/artifacts/signhex-nexus-core-1.2.3.tgz"
+bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-cms.sh --release "$RELEASE_ID"
+
+export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"
+export CMS_PACKAGE_DIR="out/${RELEASE_ID}/cms"
 export PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/1.2.3"
 
 bash scripts/bundle/assemble-runtime-bundle.sh --profile qa "$SITE_NAME"
