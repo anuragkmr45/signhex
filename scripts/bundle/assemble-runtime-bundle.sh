@@ -1,0 +1,1361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bash scripts/bundle/assemble-runtime-bundle.sh [--skip-docker] [--profile all|qa|production] <site-name>
+
+This is the canonical artifact-driven bundle assembler. It does not read product
+source repositories. Provide released artifacts for backend, CMS, and player.
+
+Profiles:
+  all         Generate both qa/ and production/ bundle trees (default)
+  qa          Generate only the QA bundle tree
+  production  Generate only the production bundle tree
+
+Required artifact inputs:
+  BACKEND_IMAGE_REF=ghcr.io/hexmon/signhex-server:1.2.3
+  BACKEND_IMAGE_ARCHIVE=/path/to/signhex-server-1.2.3.tar
+  CMS_BUNDLE_SOURCE=/path/to/signhex-nexus-core-1.2.3.tgz
+  PLAYER_ARTIFACTS_DIR=/path/to/player-release
+
+Required environment inputs:
+  QA_HOST=10.20.0.40                          # required for profile all|qa
+  CMS_PUBLIC_SCHEME=https                     # required for production, defaults to https
+  CMS_PUBLIC_HOST=10.20.0.30                  # required for profile all|production
+  BACKEND_PRIVATE_HOST=10.20.0.20             # required for profile all|production
+  BACKEND_DEVICE_HOST=10.20.0.21              # required for profile all|production, defaults to BACKEND_PRIVATE_HOST
+  DATA_PRIVATE_HOST=10.20.0.10                # required for profile all|production
+
+Optional operational inputs:
+  PLATFORM_ENV_FILE=/path/to/platform.env
+  OUTPUT_BASE=/path/to/output/root            # defaults to ./dist/onprem
+  ONPREM_CERT_MODE=generate|provided
+  ONPREM_BACKEND_CA_FILE=/path/to/ca.crt
+  CMS_TLS_CERT_FILE=/path/to/fullchain.pem
+  CMS_TLS_KEY_FILE=/path/to/privkey.pem
+  POSTGRES_IMAGE=postgres:15-alpine
+  MINIO_IMAGE=minio/minio:latest
+  NGINX_IMAGE=nginx:1.27-alpine
+
+Example:
+  QA_HOST=10.30.0.40 \
+  CMS_PUBLIC_SCHEME=https \
+  CMS_PUBLIC_HOST=10.20.0.30 \
+  BACKEND_PRIVATE_HOST=10.20.0.20 \
+  BACKEND_DEVICE_HOST=10.20.0.21 \
+  DATA_PRIVATE_HOST=10.20.0.10 \
+  BACKEND_IMAGE_REF=ghcr.io/hexmon/signhex-server:1.2.3 \
+  BACKEND_IMAGE_ARCHIVE=/artifacts/signhex-server-1.2.3.tar \
+  CMS_BUNDLE_SOURCE=/artifacts/signhex-nexus-core-1.2.3.tgz \
+  PLAYER_ARTIFACTS_DIR=/artifacts/signage-screen/1.2.3 \
+  bash scripts/bundle/assemble-runtime-bundle.sh site-a
+EOF
+}
+
+SKIP_DOCKER="false"
+PROFILE="all"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --skip-docker)
+      SKIP_DOCKER="true"
+      shift
+      ;;
+    --profile)
+      PROFILE="${2:-}"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+SITE_NAME="${1:-}"
+if [[ -z "$SITE_NAME" ]]; then
+  usage
+  exit 1
+fi
+
+case "$PROFILE" in
+  all|qa|production)
+    ;;
+  *)
+    echo "Unsupported profile: $PROFILE" >&2
+    usage
+    exit 1
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLATFORM_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RUNBOOKS_DIR="$PLATFORM_ROOT/docs/runbooks"
+BOOTSTRAP_DIR="$PLATFORM_ROOT/scripts/bootstrap"
+
+profile_enabled() {
+  local profile_name="$1"
+  [[ "$PROFILE" == "all" || "$PROFILE" == "$profile_name" ]]
+}
+
+load_env_file() {
+  local file_path="$1"
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    local line="${raw_line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" != *=* ]] && continue
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    export "$key=$value"
+  done < "$file_path"
+}
+
+build_origin() {
+  local scheme="$1"
+  local host="$2"
+  local port="$3"
+  if [[ ("$scheme" == "https" && "$port" == "443") || ("$scheme" == "http" && "$port" == "80") ]]; then
+    printf '%s://%s' "$scheme" "$host"
+  else
+    printf '%s://%s:%s' "$scheme" "$host" "$port"
+  fi
+}
+
+is_valid_ipv4() {
+  local value="$1"
+  if [[ ! "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    return 1
+  fi
+
+  local octet
+  IFS='.' read -r -a octets <<<"$value"
+  for octet in "${octets[@]}"; do
+    if (( octet < 0 || octet > 255 )); then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+require_ipv4() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    echo "$name is required and must be an IPv4 address." >&2
+    exit 1
+  fi
+  if ! is_valid_ipv4 "$value"; then
+    echo "$name must be an IPv4 address. Hostnames and DNS names are not supported: $value" >&2
+    exit 1
+  fi
+}
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required on the build machine." >&2
+    exit 1
+  fi
+}
+
+require_file() {
+  local label="$1"
+  local file_path="$2"
+  if [[ -z "$file_path" || ! -f "$file_path" ]]; then
+    echo "$label file not found: $file_path" >&2
+    exit 1
+  fi
+}
+
+find_first_artifact() {
+  local directory="$1"
+  local pattern="$2"
+  find "$directory" -type f -iname "$pattern" | LC_ALL=C sort | head -n 1
+}
+
+extract_cms_bundle() {
+  local source_path="$1"
+  local destination="$2"
+  mkdir -p "$destination"
+
+  if [[ -d "$source_path" ]]; then
+    cp -R "$source_path/." "$destination/"
+    return 0
+  fi
+
+  if [[ ! -f "$source_path" ]]; then
+    echo "CMS_BUNDLE_SOURCE does not exist: $source_path" >&2
+    exit 1
+  fi
+
+  if ! tar -xf "$source_path" -C "$destination" >/dev/null 2>&1; then
+    echo "CMS_BUNDLE_SOURCE must be a dist directory or a tar-compatible archive: $source_path" >&2
+    exit 1
+  fi
+}
+
+stage_player_bundle() {
+  local bundle_dir="$1"
+  local runtime_mode="$2"
+  local backend_host="$3"
+  local guide_name="$4"
+
+  mkdir -p "$bundle_dir/installers"
+
+  cp "$PLAYER_WINDOWS_INSTALLER" "$bundle_dir/installers/$(basename "$PLAYER_WINDOWS_INSTALLER")"
+  cp "$PLAYER_UBUNTU_DEB" "$bundle_dir/installers/$(basename "$PLAYER_UBUNTU_DEB")"
+  if [[ -n "${PLAYER_UBUNTU_APPIMAGE:-}" ]]; then
+    cp "$PLAYER_UBUNTU_APPIMAGE" "$bundle_dir/installers/$(basename "$PLAYER_UBUNTU_APPIMAGE")"
+  fi
+
+  cat > "$bundle_dir/config.example.json" <<EOF
+{
+  "apiBase": "http://$backend_host:3000",
+  "wsUrl": "ws://$backend_host:3000/ws",
+  "deviceId": "",
+  "runtime": {
+    "mode": "$runtime_mode"
+  },
+  "mtls": {
+    "enabled": false,
+    "autoRenew": true,
+    "renewBeforeDays": 30
+  },
+  "security": {
+    "allowedDomains": []
+  }
+}
+EOF
+
+  cat > "$bundle_dir/README.md" <<EOF
+# Electron Player Bundle
+
+This folder contains runtime-only player deliverables. Do not copy the player source tree to target machines.
+
+## Included artifacts
+
+- Windows installer: \`$(basename "$PLAYER_WINDOWS_INSTALLER")\`
+- Ubuntu package: \`$(basename "$PLAYER_UBUNTU_DEB")\`
+EOF
+
+  if [[ -n "${PLAYER_UBUNTU_APPIMAGE:-}" ]]; then
+    cat >> "$bundle_dir/README.md" <<EOF
+- Ubuntu AppImage: \`$(basename "$PLAYER_UBUNTU_APPIMAGE")\`
+EOF
+  fi
+
+  cat >> "$bundle_dir/README.md" <<EOF
+
+## Target endpoint
+
+\`\`\`text
+API: http://$backend_host:3000
+WS:  ws://$backend_host:3000/ws
+\`\`\`
+
+## Minimum workflow
+
+1. Copy one installer from \`./installers\` to the target player machine.
+2. Copy \`config.example.json\` to the player config location and fill the device ID after pairing if needed.
+3. Keep \`runtime.mode\` as \`$runtime_mode\`.
+4. Pair the device against the backend IP, not the CMS IP.
+5. Verify fullscreen kiosk behavior and confirm the device appears in the CMS.
+
+See \`../$guide_name\` for the environment deployment steps.
+EOF
+}
+
+write_skip_placeholder() {
+  local target_dir="$1"
+  local archive_basename="$2"
+  local image_ref="$3"
+  cat > "$target_dir/${archive_basename}.SKIPPED.txt" <<EOF
+Docker image export was skipped for $image_ref.
+Run the bundle command again without --skip-docker on a build machine with Docker enabled.
+EOF
+}
+
+copy_archive_to_targets() {
+  local archive_path="$1"
+  shift
+  for target_dir in "$@"; do
+    cp "$archive_path" "$target_dir/$(basename "$archive_path")"
+  done
+}
+
+write_load_images_script() {
+  local destination="$1"
+  cat > "$destination" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+shopt -s nullglob
+for image in ./images/*.tar; do
+  echo "Loading $image"
+  docker load -i "$image"
+done
+EOF
+}
+
+write_start_script() {
+  local destination="$1"
+  local env_file="$2"
+  cat > "$destination" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose --env-file $env_file up -d
+EOF
+}
+
+write_stop_script() {
+  local destination="$1"
+  local env_file="$2"
+  cat > "$destination" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose --env-file $env_file down
+EOF
+}
+
+TEMP_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signhex-platform.XXXXXX")"
+cleanup_temp_work_dir() {
+  rm -rf "$TEMP_WORK_DIR"
+}
+trap cleanup_temp_work_dir EXIT
+
+PLATFORM_ENV_FILE="${PLATFORM_ENV_FILE:-}"
+if [[ -n "$PLATFORM_ENV_FILE" ]]; then
+  require_file "PLATFORM_ENV_FILE" "$PLATFORM_ENV_FILE"
+  load_env_file "$PLATFORM_ENV_FILE"
+fi
+
+QA_HOST="${QA_HOST:-}"
+CMS_PUBLIC_SCHEME="${CMS_PUBLIC_SCHEME:-https}"
+CMS_PUBLIC_HOST="${CMS_PUBLIC_HOST:-}"
+BACKEND_PRIVATE_HOST="${BACKEND_PRIVATE_HOST:-}"
+BACKEND_DEVICE_HOST="${BACKEND_DEVICE_HOST:-$BACKEND_PRIVATE_HOST}"
+DATA_PRIVATE_HOST="${DATA_PRIVATE_HOST:-}"
+
+BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-}"
+BACKEND_IMAGE_ARCHIVE="${BACKEND_IMAGE_ARCHIVE:-}"
+CMS_BUNDLE_SOURCE="${CMS_BUNDLE_SOURCE:-}"
+PLAYER_ARTIFACTS_DIR="${PLAYER_ARTIFACTS_DIR:-}"
+
+QA_CMS_HTTP_PORT="${QA_CMS_HTTP_PORT:-80}"
+QA_API_HOST_PORT="${QA_API_HOST_PORT:-3000}"
+QA_POSTGRES_HOST_PORT="${QA_POSTGRES_HOST_PORT:-5432}"
+QA_MINIO_HOST_PORT="${QA_MINIO_HOST_PORT:-9000}"
+QA_MINIO_CONSOLE_PORT="${QA_MINIO_CONSOLE_PORT:-9001}"
+
+CMS_HTTP_PORT="${CMS_HTTP_PORT:-80}"
+CMS_HTTPS_PORT="${CMS_HTTPS_PORT:-443}"
+API_HOST_PORT="${API_HOST_PORT:-3000}"
+POSTGRES_HOST_PORT="${POSTGRES_HOST_PORT:-5432}"
+MINIO_HOST_PORT="${MINIO_HOST_PORT:-9000}"
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+
+CMS_TLS_CERT_FILE="${CMS_TLS_CERT_FILE:-}"
+CMS_TLS_KEY_FILE="${CMS_TLS_KEY_FILE:-}"
+ONPREM_CERT_MODE="${ONPREM_CERT_MODE:-generate}"
+ONPREM_BACKEND_CA_FILE="${ONPREM_BACKEND_CA_FILE:-}"
+
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:15-alpine}"
+MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
+NGINX_IMAGE="${NGINX_IMAGE:-nginx:1.27-alpine}"
+
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
+POSTGRES_DB="${POSTGRES_DB:-signhex}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
+MINIO_USE_SSL="${MINIO_USE_SSL:-false}"
+MINIO_REGION="${MINIO_REGION:-us-east-1}"
+JWT_SECRET="${JWT_SECRET:-replace-with-32-char-secret}"
+JWT_EXPIRY="${JWT_EXPIRY:-900}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@signhex.invalid}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-ChangeMe123!}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-3000}"
+CA_CERT_PATH="${CA_CERT_PATH:-./certs/ca.crt}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
+FFMPEG_PATH="${FFMPEG_PATH:-ffmpeg}"
+LIBREOFFICE_PATH="${LIBREOFFICE_PATH:-soffice}"
+PG_DUMP_PATH="${PG_DUMP_PATH:-pg_dump}"
+TAR_PATH="${TAR_PATH:-tar}"
+HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH="${HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH:-}"
+PG_BOSS_SCHEMA="${PG_BOSS_SCHEMA:-pgboss}"
+RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}"
+RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-1000}"
+RATE_LIMIT_TIME_WINDOW="${RATE_LIMIT_TIME_WINDOW:-1 minute}"
+CSRF_ENABLED="${CSRF_ENABLED:-true}"
+PASSWORD_MIN_LENGTH="${PASSWORD_MIN_LENGTH:-12}"
+LOGIN_MAX_ATTEMPTS="${LOGIN_MAX_ATTEMPTS:-5}"
+LOGIN_LOCKOUT_WINDOW_SECONDS="${LOGIN_LOCKOUT_WINDOW_SECONDS:-900}"
+MAX_UPLOAD_MB="${MAX_UPLOAD_MB:-200}"
+STORAGE_QUOTA_BYTES="${STORAGE_QUOTA_BYTES:-0}"
+
+OUTPUT_BASE="${OUTPUT_BASE:-$PLATFORM_ROOT/dist/onprem}"
+
+if profile_enabled qa; then
+  require_ipv4 "QA_HOST" "$QA_HOST"
+fi
+
+if profile_enabled production; then
+  if [[ "$CMS_PUBLIC_SCHEME" != "https" ]]; then
+    echo "CMS_PUBLIC_SCHEME must be https for the production on-prem profile." >&2
+    exit 1
+  fi
+  require_ipv4 "CMS_PUBLIC_HOST" "$CMS_PUBLIC_HOST"
+  require_ipv4 "BACKEND_PRIVATE_HOST" "$BACKEND_PRIVATE_HOST"
+  require_ipv4 "BACKEND_DEVICE_HOST" "$BACKEND_DEVICE_HOST"
+  require_ipv4 "DATA_PRIVATE_HOST" "$DATA_PRIVATE_HOST"
+fi
+
+if [[ "$ONPREM_CERT_MODE" != "generate" && "$ONPREM_CERT_MODE" != "provided" ]]; then
+  echo "ONPREM_CERT_MODE must be either 'generate' or 'provided'." >&2
+  exit 1
+fi
+
+require_command openssl
+require_command tar
+
+if [[ "$SKIP_DOCKER" != "true" ]]; then
+  require_command docker
+fi
+
+if [[ -z "$BACKEND_IMAGE_REF" ]]; then
+  echo "BACKEND_IMAGE_REF is required." >&2
+  exit 1
+fi
+require_file "BACKEND_IMAGE_ARCHIVE" "$BACKEND_IMAGE_ARCHIVE"
+
+if [[ -z "$CMS_BUNDLE_SOURCE" || (! -f "$CMS_BUNDLE_SOURCE" && ! -d "$CMS_BUNDLE_SOURCE") ]]; then
+  echo "CMS_BUNDLE_SOURCE must point to a CMS dist directory or a tar-compatible archive." >&2
+  exit 1
+fi
+
+if [[ ! -d "$PLAYER_ARTIFACTS_DIR" ]]; then
+  echo "PLAYER_ARTIFACTS_DIR does not exist: $PLAYER_ARTIFACTS_DIR" >&2
+  exit 1
+fi
+
+PLAYER_WINDOWS_INSTALLER="$(find_first_artifact "$PLAYER_ARTIFACTS_DIR" '*.exe')"
+PLAYER_UBUNTU_DEB="$(find_first_artifact "$PLAYER_ARTIFACTS_DIR" '*.deb')"
+PLAYER_UBUNTU_APPIMAGE="$(find_first_artifact "$PLAYER_ARTIFACTS_DIR" '*.AppImage' || true)"
+
+if [[ -z "$PLAYER_WINDOWS_INSTALLER" || -z "$PLAYER_UBUNTU_DEB" ]]; then
+  echo "Missing required player artifacts in $PLAYER_ARTIFACTS_DIR. Required: one Windows .exe and one Ubuntu .deb installer." >&2
+  exit 1
+fi
+
+CMS_QA_ORIGIN=""
+CMS_PRODUCTION_ORIGIN=""
+if profile_enabled qa; then
+  CMS_QA_ORIGIN="$(build_origin "http" "$QA_HOST" "$QA_CMS_HTTP_PORT")"
+fi
+if profile_enabled production; then
+  CMS_PRODUCTION_ORIGIN="$(build_origin "$CMS_PUBLIC_SCHEME" "$CMS_PUBLIC_HOST" "$CMS_HTTPS_PORT")"
+fi
+
+BUNDLE_ROOT="$OUTPUT_BASE/$SITE_NAME"
+QA_ROOT="$BUNDLE_ROOT/qa"
+PRODUCTION_ROOT="$BUNDLE_ROOT/production"
+QA_BACKEND_DIR="$QA_ROOT/backend"
+QA_CMS_DIR="$QA_ROOT/cms"
+QA_ELECTRON_DIR="$QA_ROOT/electron"
+PROD_DATA_DIR="$PRODUCTION_ROOT/data"
+PROD_BACKEND_DIR="$PRODUCTION_ROOT/backend"
+PROD_CMS_DIR="$PRODUCTION_ROOT/cms"
+PROD_ELECTRON_DIR="$PRODUCTION_ROOT/electron"
+
+rm -rf "$BUNDLE_ROOT"
+mkdir -p "$BUNDLE_ROOT"
+
+if profile_enabled qa; then
+  mkdir -p \
+    "$QA_BACKEND_DIR/images" \
+    "$QA_BACKEND_DIR/certs" \
+    "$QA_CMS_DIR/images" \
+    "$QA_CMS_DIR/nginx" \
+    "$QA_CMS_DIR/www" \
+    "$QA_ELECTRON_DIR"
+fi
+
+if profile_enabled production; then
+  mkdir -p \
+    "$PROD_DATA_DIR/images" \
+    "$PROD_BACKEND_DIR/images" \
+    "$PROD_BACKEND_DIR/certs" \
+    "$PROD_CMS_DIR/images" \
+    "$PROD_CMS_DIR/nginx" \
+    "$PROD_CMS_DIR/tls" \
+    "$PROD_CMS_DIR/www" \
+    "$PROD_CMS_DIR/admin-browser" \
+    "$PROD_ELECTRON_DIR"
+fi
+
+BACKEND_IMAGE_ARCHIVE_NAME="$(basename "$BACKEND_IMAGE_ARCHIVE")"
+POSTGRES_IMAGE_ARCHIVE_NAME="${POSTGRES_IMAGE//[:\/]/-}.tar"
+MINIO_IMAGE_ARCHIVE_NAME="${MINIO_IMAGE//[:\/]/-}.tar"
+NGINX_IMAGE_ARCHIVE_NAME="${NGINX_IMAGE//[:\/]/-}.tar"
+
+POSTGRES_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$POSTGRES_IMAGE_ARCHIVE_NAME"
+MINIO_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$MINIO_IMAGE_ARCHIVE_NAME"
+NGINX_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$NGINX_IMAGE_ARCHIVE_NAME"
+
+if profile_enabled qa; then
+  copy_archive_to_targets "$BACKEND_IMAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
+fi
+
+if profile_enabled production; then
+  copy_archive_to_targets "$BACKEND_IMAGE_ARCHIVE" "$PROD_BACKEND_DIR/images"
+fi
+
+if [[ "$SKIP_DOCKER" == "true" ]]; then
+  echo "Skipping base image pull/export for postgres, minio, and nginx. Writing placeholders only."
+  if profile_enabled qa; then
+    write_skip_placeholder "$QA_BACKEND_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
+    write_skip_placeholder "$QA_BACKEND_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+    write_skip_placeholder "$QA_CMS_DIR/images" "$NGINX_IMAGE_ARCHIVE_NAME" "$NGINX_IMAGE"
+  fi
+  if profile_enabled production; then
+    write_skip_placeholder "$PROD_DATA_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
+    write_skip_placeholder "$PROD_DATA_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+    write_skip_placeholder "$PROD_CMS_DIR/images" "$NGINX_IMAGE_ARCHIVE_NAME" "$NGINX_IMAGE"
+  fi
+else
+  echo "Preparing base images..."
+  docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1 || docker pull "$POSTGRES_IMAGE"
+  docker image inspect "$MINIO_IMAGE" >/dev/null 2>&1 || docker pull "$MINIO_IMAGE"
+  docker image inspect "$NGINX_IMAGE" >/dev/null 2>&1 || docker pull "$NGINX_IMAGE"
+
+  echo "Saving base images..."
+  docker save -o "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$POSTGRES_IMAGE"
+  docker save -o "$MINIO_IMAGE_ARCHIVE_TEMP" "$MINIO_IMAGE"
+  docker save -o "$NGINX_IMAGE_ARCHIVE_TEMP" "$NGINX_IMAGE"
+
+  if profile_enabled qa; then
+    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$NGINX_IMAGE_ARCHIVE_TEMP" "$QA_CMS_DIR/images"
+  fi
+
+  if profile_enabled production; then
+    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
+    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
+    copy_archive_to_targets "$NGINX_IMAGE_ARCHIVE_TEMP" "$PROD_CMS_DIR/images"
+  fi
+fi
+
+if profile_enabled qa; then
+  extract_cms_bundle "$CMS_BUNDLE_SOURCE" "$QA_CMS_DIR/www"
+fi
+
+if profile_enabled production; then
+  extract_cms_bundle "$CMS_BUNDLE_SOURCE" "$PROD_CMS_DIR/www"
+fi
+
+CERTS_OUTPUT_DIR="$TEMP_WORK_DIR/generated-certs"
+BACKEND_CA_SOURCE_FILE=""
+
+if [[ "$ONPREM_CERT_MODE" == "generate" ]]; then
+  CERT_HOST="$QA_HOST"
+  if profile_enabled production; then
+    CERT_HOST="$CMS_PUBLIC_HOST"
+  fi
+  echo "Generating site-local certificate material for $CERT_HOST..."
+  bash "$BOOTSTRAP_DIR/generate-ip-certs.sh" "$SITE_NAME" "$CERT_HOST" "$CERTS_OUTPUT_DIR"
+  BACKEND_CA_SOURCE_FILE="$CERTS_OUTPUT_DIR/cms-root-ca.crt"
+
+  if profile_enabled production; then
+    cp "$CERTS_OUTPUT_DIR/tls.crt" "$PROD_CMS_DIR/tls/tls.crt"
+    cp "$CERTS_OUTPUT_DIR/tls.key" "$PROD_CMS_DIR/tls/tls.key"
+    cp "$CERTS_OUTPUT_DIR/cms-root-ca.crt" "$PROD_CMS_DIR/admin-browser/cms-trust.crt"
+  fi
+else
+  require_file "ONPREM_BACKEND_CA_FILE" "$ONPREM_BACKEND_CA_FILE"
+  BACKEND_CA_SOURCE_FILE="$ONPREM_BACKEND_CA_FILE"
+
+  if profile_enabled production; then
+    require_file "CMS_TLS_CERT_FILE" "$CMS_TLS_CERT_FILE"
+    require_file "CMS_TLS_KEY_FILE" "$CMS_TLS_KEY_FILE"
+    cp "$CMS_TLS_CERT_FILE" "$PROD_CMS_DIR/tls/tls.crt"
+    cp "$CMS_TLS_KEY_FILE" "$PROD_CMS_DIR/tls/tls.key"
+    cp "$CMS_TLS_CERT_FILE" "$PROD_CMS_DIR/admin-browser/cms-server.crt"
+  fi
+fi
+
+if profile_enabled qa; then
+  cp "$BACKEND_CA_SOURCE_FILE" "$QA_BACKEND_DIR/certs/ca.crt"
+  cat > "$QA_BACKEND_DIR/certs/README.md" <<'EOF'
+# QA Backend Pairing CA Material
+
+This folder contains the pairing CA certificate required by the Signhex API:
+
+- `ca.crt`
+
+Keep this folder mounted at `/app/certs` through the provided Docker Compose file.
+EOF
+fi
+
+if profile_enabled production; then
+  cp "$BACKEND_CA_SOURCE_FILE" "$PROD_BACKEND_DIR/certs/ca.crt"
+
+  cat > "$PROD_BACKEND_DIR/certs/README.md" <<'EOF'
+# Production Backend Pairing CA Material
+
+This bundle requires only the pairing CA certificate:
+
+- `ca.crt`
+
+The production on-prem profile uses backend/player traffic on port 3000. Do not add `server.crt` or `server.key` here for this deployment model.
+EOF
+
+  cat > "$PROD_CMS_DIR/tls/README.md" <<EOF
+# CMS TLS Material
+
+The CMS guest serves HTTPS from:
+
+- \`tls.crt\`
+- \`tls.key\`
+
+These files were prepared by the bundle builder in \`ONPREM_CERT_MODE=$ONPREM_CERT_MODE\`.
+EOF
+
+  cat > "$PROD_CMS_DIR/admin-browser/README.md" <<EOF
+# Admin Browser Trust Material
+
+CMS URL:
+
+\`\`\`text
+$CMS_PRODUCTION_ORIGIN
+\`\`\`
+EOF
+
+  if [[ "$ONPREM_CERT_MODE" == "generate" ]]; then
+    cat >> "$PROD_CMS_DIR/admin-browser/README.md" <<'EOF'
+
+Import `cms-trust.crt` into admin/operator browsers before first login.
+EOF
+  else
+    cat >> "$PROD_CMS_DIR/admin-browser/README.md" <<'EOF'
+
+If the provided certificate is self-signed, import `cms-server.crt` into admin/operator browsers. Otherwise import the issuing CA separately.
+EOF
+  fi
+
+  printf '%s\n' "$CMS_PRODUCTION_ORIGIN" > "$PROD_CMS_DIR/admin-browser/cms-origin.txt"
+fi
+
+if profile_enabled qa; then
+  cat > "$QA_BACKEND_DIR/.env.qa" <<EOF
+BACKEND_IMAGE=$BACKEND_IMAGE_REF
+POSTGRES_IMAGE=$POSTGRES_IMAGE
+MINIO_IMAGE=$MINIO_IMAGE
+NODE_ENV=production
+HOST=$HOST
+PORT=$PORT
+API_HOST_PORT=$QA_API_HOST_PORT
+POSTGRES_USER=$POSTGRES_USER
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+POSTGRES_DB=$POSTGRES_DB
+POSTGRES_HOST_PORT=$QA_POSTGRES_HOST_PORT
+MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
+MINIO_SECRET_KEY=$MINIO_SECRET_KEY
+MINIO_HOST_PORT=$QA_MINIO_HOST_PORT
+MINIO_CONSOLE_PORT=$QA_MINIO_CONSOLE_PORT
+DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB
+JWT_SECRET=$JWT_SECRET
+JWT_EXPIRY=$JWT_EXPIRY
+MINIO_ENDPOINT=minio
+MINIO_PORT=9000
+MINIO_USE_SSL=$MINIO_USE_SSL
+MINIO_REGION=$MINIO_REGION
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+CA_CERT_PATH=$CA_CERT_PATH
+LOG_LEVEL=$LOG_LEVEL
+ENABLE_SWAGGER_UI=false
+FFMPEG_PATH=$FFMPEG_PATH
+LIBREOFFICE_PATH=$LIBREOFFICE_PATH
+PG_DUMP_PATH=$PG_DUMP_PATH
+TAR_PATH=$TAR_PATH
+HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH=$HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH
+PG_BOSS_SCHEMA=$PG_BOSS_SCHEMA
+RATE_LIMIT_ENABLED=$RATE_LIMIT_ENABLED
+RATE_LIMIT_MAX=$RATE_LIMIT_MAX
+RATE_LIMIT_TIME_WINDOW=$RATE_LIMIT_TIME_WINDOW
+CORS_ORIGINS=$CMS_QA_ORIGIN
+SOCKET_ALLOWED_ORIGINS=$CMS_QA_ORIGIN
+APP_PUBLIC_BASE_URL=$CMS_QA_ORIGIN
+CSRF_ENABLED=$CSRF_ENABLED
+PASSWORD_MIN_LENGTH=$PASSWORD_MIN_LENGTH
+LOGIN_MAX_ATTEMPTS=$LOGIN_MAX_ATTEMPTS
+LOGIN_LOCKOUT_WINDOW_SECONDS=$LOGIN_LOCKOUT_WINDOW_SECONDS
+MAX_UPLOAD_MB=$MAX_UPLOAD_MB
+STORAGE_QUOTA_BYTES=$STORAGE_QUOTA_BYTES
+HEXMON_RUNTIME_CONTAINER=true
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+EOF
+
+  cat > "$QA_CMS_DIR/.env.qa" <<EOF
+NGINX_IMAGE=$NGINX_IMAGE
+QA_HOST=$QA_HOST
+QA_CMS_HTTP_PORT=$QA_CMS_HTTP_PORT
+QA_API_HOST_PORT=$QA_API_HOST_PORT
+EOF
+
+  cat > "$QA_BACKEND_DIR/docker-compose.yml" <<'EOF'
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT}:5432"
+    volumes:
+      - signhex_qa_postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: ${MINIO_IMAGE}
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_HOST_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - signhex_qa_minio_data:/data
+
+  api:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env.qa
+    ports:
+      - "${API_HOST_PORT}:3000"
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm start
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/v1/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  signhex_qa_postgres_data:
+  signhex_qa_minio_data:
+EOF
+
+  cat > "$QA_CMS_DIR/docker-compose.yml" <<'EOF'
+services:
+  cms:
+    image: ${NGINX_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${QA_CMS_HTTP_PORT}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./www:/usr/share/nginx/html:ro
+EOF
+
+  cat > "$QA_CMS_DIR/nginx/default.conf" <<EOF
+server {
+  listen 80;
+  server_name _;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+
+  location /api/v1/ {
+    proxy_pass http://$QA_HOST:3000/api/v1/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+
+  location /socket.io/ {
+    proxy_pass http://$QA_HOST:3000/socket.io/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 600s;
+  }
+
+  location / {
+    try_files \$uri \$uri/ /index.html;
+    add_header Cache-Control "no-store";
+  }
+}
+EOF
+
+  write_load_images_script "$QA_BACKEND_DIR/load-images.sh"
+  write_load_images_script "$QA_CMS_DIR/load-images.sh"
+  write_start_script "$QA_BACKEND_DIR/start.sh" ".env.qa"
+  write_start_script "$QA_CMS_DIR/start.sh" ".env.qa"
+  write_stop_script "$QA_BACKEND_DIR/stop.sh" ".env.qa"
+  write_stop_script "$QA_CMS_DIR/stop.sh" ".env.qa"
+
+  cat > "$QA_BACKEND_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.qa
+docker compose --env-file .env.qa exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT}/minio/health/live" >/dev/null
+curl -fsS "http://127.0.0.1:${API_HOST_PORT}/api/v1/health" >/dev/null
+echo "QA backend stack healthy."
+EOF
+
+  cat > "$QA_CMS_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.qa
+curl -fsS "http://127.0.0.1:${QA_CMS_HTTP_PORT}/" >/dev/null
+curl -fsS "http://127.0.0.1:${QA_CMS_HTTP_PORT}/api/v1/health" >/dev/null
+echo "QA CMS healthy."
+EOF
+
+  cat > "$QA_BACKEND_DIR/README.md" <<EOF
+# QA Backend Host Bundle
+
+This folder runs the QA backend, PostgreSQL, and MinIO on one machine.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- API: http://$QA_HOST:$QA_API_HOST_PORT
+- PostgreSQL: $QA_POSTGRES_HOST_PORT/tcp
+- MinIO API: $QA_MINIO_HOST_PORT/tcp
+- MinIO Console: $QA_MINIO_CONSOLE_PORT/tcp
+EOF
+
+  cat > "$QA_CMS_DIR/README.md" <<EOF
+# QA CMS Bundle
+
+This folder runs the prebuilt CMS through Nginx on the QA host.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- CMS: http://$QA_HOST:$QA_CMS_HTTP_PORT
+- API/socket traffic proxy to: http://$QA_HOST:$QA_API_HOST_PORT
+EOF
+
+  stage_player_bundle "$QA_ELECTRON_DIR" "qa" "$QA_HOST" "QA_SETUP_GUIDE.md"
+  cp "$RUNBOOKS_DIR/onprem-qa-setup.md" "$QA_ROOT/QA_SETUP_GUIDE.md"
+fi
+
+if profile_enabled production; then
+  cat > "$PROD_DATA_DIR/.env.production" <<EOF
+POSTGRES_IMAGE=$POSTGRES_IMAGE
+MINIO_IMAGE=$MINIO_IMAGE
+POSTGRES_USER=$POSTGRES_USER
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+POSTGRES_DB=$POSTGRES_DB
+POSTGRES_HOST_PORT=$POSTGRES_HOST_PORT
+MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
+MINIO_SECRET_KEY=$MINIO_SECRET_KEY
+MINIO_HOST_PORT=$MINIO_HOST_PORT
+MINIO_CONSOLE_PORT=$MINIO_CONSOLE_PORT
+EOF
+
+  cat > "$PROD_BACKEND_DIR/.env.production" <<EOF
+BACKEND_IMAGE=$BACKEND_IMAGE_REF
+NODE_ENV=production
+HOST=$HOST
+PORT=$PORT
+API_HOST_PORT=$API_HOST_PORT
+DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@$DATA_PRIVATE_HOST:5432/$POSTGRES_DB
+JWT_SECRET=$JWT_SECRET
+JWT_EXPIRY=$JWT_EXPIRY
+MINIO_ENDPOINT=$DATA_PRIVATE_HOST
+MINIO_PORT=9000
+MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
+MINIO_SECRET_KEY=$MINIO_SECRET_KEY
+MINIO_USE_SSL=$MINIO_USE_SSL
+MINIO_REGION=$MINIO_REGION
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+CA_CERT_PATH=$CA_CERT_PATH
+LOG_LEVEL=$LOG_LEVEL
+ENABLE_SWAGGER_UI=false
+FFMPEG_PATH=$FFMPEG_PATH
+LIBREOFFICE_PATH=$LIBREOFFICE_PATH
+PG_DUMP_PATH=$PG_DUMP_PATH
+TAR_PATH=$TAR_PATH
+HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH=$HEXMON_WEBPAGE_CAPTURE_EXECUTABLE_PATH
+PG_BOSS_SCHEMA=$PG_BOSS_SCHEMA
+RATE_LIMIT_ENABLED=$RATE_LIMIT_ENABLED
+RATE_LIMIT_MAX=$RATE_LIMIT_MAX
+RATE_LIMIT_TIME_WINDOW=$RATE_LIMIT_TIME_WINDOW
+CORS_ORIGINS=$CMS_PRODUCTION_ORIGIN
+SOCKET_ALLOWED_ORIGINS=$CMS_PRODUCTION_ORIGIN
+APP_PUBLIC_BASE_URL=$CMS_PRODUCTION_ORIGIN
+CSRF_ENABLED=$CSRF_ENABLED
+PASSWORD_MIN_LENGTH=$PASSWORD_MIN_LENGTH
+LOGIN_MAX_ATTEMPTS=$LOGIN_MAX_ATTEMPTS
+LOGIN_LOCKOUT_WINDOW_SECONDS=$LOGIN_LOCKOUT_WINDOW_SECONDS
+MAX_UPLOAD_MB=$MAX_UPLOAD_MB
+STORAGE_QUOTA_BYTES=$STORAGE_QUOTA_BYTES
+HEXMON_RUNTIME_CONTAINER=true
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+EOF
+
+  cat > "$PROD_CMS_DIR/.env.production" <<EOF
+NGINX_IMAGE=$NGINX_IMAGE
+CMS_PUBLIC_SCHEME=$CMS_PUBLIC_SCHEME
+CMS_PUBLIC_ORIGIN=$CMS_PRODUCTION_ORIGIN
+CMS_HTTP_PORT=$CMS_HTTP_PORT
+CMS_HTTPS_PORT=$CMS_HTTPS_PORT
+BACKEND_PRIVATE_HOST=$BACKEND_PRIVATE_HOST
+EOF
+
+  cat > "$PROD_DATA_DIR/docker-compose.yml" <<'EOF'
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT}:5432"
+    volumes:
+      - signhex_postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: ${MINIO_IMAGE}
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_HOST_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - signhex_minio_data:/data
+
+volumes:
+  signhex_postgres_data:
+  signhex_minio_data:
+EOF
+
+  cat > "$PROD_BACKEND_DIR/docker-compose.yml" <<'EOF'
+services:
+  api:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "${API_HOST_PORT}:3000"
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm start
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/v1/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+EOF
+
+  cat > "$PROD_CMS_DIR/docker-compose.yml" <<'EOF'
+services:
+  cms:
+    image: ${NGINX_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${CMS_HTTP_PORT}:80"
+      - "${CMS_HTTPS_PORT}:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./tls:/etc/nginx/tls:ro
+      - ./www:/usr/share/nginx/html:ro
+EOF
+
+  cat > "$PROD_CMS_DIR/nginx/default.conf" <<EOF
+server {
+  listen 80;
+  server_name _;
+
+  return 301 https://\$host\$request_uri;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name _;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  ssl_certificate /etc/nginx/tls/tls.crt;
+  ssl_certificate_key /etc/nginx/tls/tls.key;
+  ssl_session_timeout 1d;
+  ssl_session_cache shared:SignhexTLS:10m;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+
+  location /api/v1/ {
+    proxy_pass http://$BACKEND_PRIVATE_HOST:3000/api/v1/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+
+  location /socket.io/ {
+    proxy_pass http://$BACKEND_PRIVATE_HOST:3000/socket.io/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 600s;
+  }
+
+  location / {
+    try_files \$uri \$uri/ /index.html;
+    add_header Cache-Control "no-store";
+  }
+}
+EOF
+
+  write_load_images_script "$PROD_DATA_DIR/load-images.sh"
+  write_load_images_script "$PROD_BACKEND_DIR/load-images.sh"
+  write_load_images_script "$PROD_CMS_DIR/load-images.sh"
+  write_start_script "$PROD_DATA_DIR/start.sh" ".env.production"
+  write_start_script "$PROD_BACKEND_DIR/start.sh" ".env.production"
+  write_start_script "$PROD_CMS_DIR/start.sh" ".env.production"
+  write_stop_script "$PROD_DATA_DIR/stop.sh" ".env.production"
+  write_stop_script "$PROD_BACKEND_DIR/stop.sh" ".env.production"
+  write_stop_script "$PROD_CMS_DIR/stop.sh" ".env.production"
+
+  cat > "$PROD_DATA_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.production
+docker compose --env-file .env.production exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT}/minio/health/live" >/dev/null
+echo "Production data tier healthy."
+EOF
+
+  cat > "$PROD_BACKEND_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.production
+curl -fsS "http://127.0.0.1:${API_HOST_PORT}/api/v1/health" >/dev/null
+echo "Production backend healthy."
+EOF
+
+  cat > "$PROD_CMS_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.production
+curl -fsSI "http://127.0.0.1:${CMS_HTTP_PORT}/" | grep -q "301"
+curl -kfsS "https://127.0.0.1:${CMS_HTTPS_PORT}/" >/dev/null
+curl -kfsS "https://127.0.0.1:${CMS_HTTPS_PORT}/api/v1/health" >/dev/null
+echo "Production CMS healthy."
+EOF
+
+  cat > "$PROD_DATA_DIR/README.md" <<EOF
+# Production Data Bundle
+
+This folder runs PostgreSQL and MinIO only.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- PostgreSQL: $POSTGRES_HOST_PORT/tcp
+- MinIO API: $MINIO_HOST_PORT/tcp
+- MinIO Console: $MINIO_CONSOLE_PORT/tcp
+EOF
+
+  cat > "$PROD_BACKEND_DIR/README.md" <<EOF
+# Production Backend Bundle
+
+This folder runs the Signhex API only.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- API: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT
+- Player endpoint: http://$BACKEND_DEVICE_HOST:3000
+EOF
+
+  cat > "$PROD_CMS_DIR/README.md" <<EOF
+# Production CMS Bundle
+
+This folder runs the prebuilt CMS through Nginx with HTTPS termination.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- CMS: $CMS_PRODUCTION_ORIGIN
+- API/socket proxy target: http://$BACKEND_PRIVATE_HOST:3000
+EOF
+
+  stage_player_bundle "$PROD_ELECTRON_DIR" "production" "$BACKEND_DEVICE_HOST" "PRODUCTION_SETUP_GUIDE.md"
+  cp "$RUNBOOKS_DIR/onprem-production-setup.md" "$PRODUCTION_ROOT/PRODUCTION_SETUP_GUIDE.md"
+fi
+
+cat > "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+# Signhex Runtime Bundle Overview
+
+Site: **$SITE_NAME**
+
+This bundle was assembled from released runtime artifacts. Do not copy the source repositories to QA or production targets.
+
+## Product inputs
+
+- Backend image ref: \`$BACKEND_IMAGE_REF\`
+- Backend image archive: \`$(basename "$BACKEND_IMAGE_ARCHIVE")\`
+- CMS bundle source: \`$(basename "$CMS_BUNDLE_SOURCE")\`
+- Windows player installer: \`$(basename "$PLAYER_WINDOWS_INSTALLER")\`
+- Ubuntu player installer: \`$(basename "$PLAYER_UBUNTU_DEB")\`
+EOF
+
+if [[ -n "${PLAYER_UBUNTU_APPIMAGE:-}" ]]; then
+  cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+- Ubuntu player AppImage: \`$(basename "$PLAYER_UBUNTU_APPIMAGE")\`
+EOF
+fi
+
+cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<'EOF'
+
+## Included profiles
+EOF
+
+if profile_enabled qa; then
+  cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+
+- QA
+  - CMS: http://$QA_HOST:$QA_CMS_HTTP_PORT
+  - backend/player: http://$QA_HOST:$QA_API_HOST_PORT
+  - folders:
+    - \`qa/backend/\`
+    - \`qa/cms/\`
+    - \`qa/electron/\`
+EOF
+fi
+
+if profile_enabled production; then
+  cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+
+- Production
+  - CMS: $CMS_PRODUCTION_ORIGIN
+  - backend: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT
+  - player endpoint: http://$BACKEND_DEVICE_HOST:3000
+  - folders:
+    - \`production/data/\`
+    - \`production/backend/\`
+    - \`production/cms/\`
+    - \`production/electron/\`
+EOF
+fi
+
+cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<'EOF'
+
+## Shared bundle files
+
+- `SHA256SUMS.txt`
+- `verify-bundle.sh`
+- `BUNDLE_OVERVIEW.md`
+
+Run this before copying the bundle:
+
+```bash
+cd dist/onprem/<site-name>
+./verify-bundle.sh
+```
+EOF
+
+cat > "$BUNDLE_ROOT/PROXMOX_SIZING.md" <<'EOF'
+# Proxmox Guest Sizing
+
+## Recommended topology
+
+- QA:
+  - one QA host for CMS + backend + PostgreSQL + MinIO
+  - separate player machines on the same network
+- Production:
+  - Data VM
+  - Backend VM
+  - CMS guest as a small VM by default or an unprivileged LXC when Docker support is already prepared
+
+## Production baseline
+
+- Data VM: 6 vCPU / 16 GB RAM / 500 GB NVMe-backed storage minimum
+- Backend VM: 6 vCPU / 12 GB RAM / 120 GB SSD
+- CMS guest: 2 vCPU / 4 GB RAM / 40 GB SSD
+
+## Rules
+
+- Keep Data and Backend on VMs in the primary production topology.
+- CMS may use an unprivileged LXC when resource optimization matters and Docker/Compose support is already prepared.
+- Keep players on separate desktop machines connected to the same network as the backend.
+EOF
+
+cat > "$BUNDLE_ROOT/verify-bundle.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! -f "SHA256SUMS.txt" ]]; then
+  echo "SHA256SUMS.txt is missing." >&2
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c SHA256SUMS.txt
+  exit 0
+fi
+
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 -c SHA256SUMS.txt
+  exit 0
+fi
+
+echo "Neither sha256sum nor shasum is available on this machine." >&2
+exit 1
+EOF
+
+chmod +x "$BUNDLE_ROOT/verify-bundle.sh"
+
+if profile_enabled qa; then
+  chmod +x \
+    "$QA_BACKEND_DIR/load-images.sh" \
+    "$QA_BACKEND_DIR/start.sh" \
+    "$QA_BACKEND_DIR/stop.sh" \
+    "$QA_BACKEND_DIR/health-check.sh" \
+    "$QA_CMS_DIR/load-images.sh" \
+    "$QA_CMS_DIR/start.sh" \
+    "$QA_CMS_DIR/stop.sh" \
+    "$QA_CMS_DIR/health-check.sh"
+fi
+
+if profile_enabled production; then
+  chmod +x \
+    "$PROD_DATA_DIR/load-images.sh" \
+    "$PROD_DATA_DIR/start.sh" \
+    "$PROD_DATA_DIR/stop.sh" \
+    "$PROD_DATA_DIR/health-check.sh" \
+    "$PROD_BACKEND_DIR/load-images.sh" \
+    "$PROD_BACKEND_DIR/start.sh" \
+    "$PROD_BACKEND_DIR/stop.sh" \
+    "$PROD_BACKEND_DIR/health-check.sh" \
+    "$PROD_CMS_DIR/load-images.sh" \
+    "$PROD_CMS_DIR/start.sh" \
+    "$PROD_CMS_DIR/stop.sh" \
+    "$PROD_CMS_DIR/health-check.sh"
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (
+    cd "$BUNDLE_ROOT"
+    find . -type f ! -name 'SHA256SUMS.txt' -print | LC_ALL=C sort | while IFS= read -r file; do
+      sha256sum "$file"
+    done
+  ) > "$BUNDLE_ROOT/SHA256SUMS.txt"
+elif command -v shasum >/dev/null 2>&1; then
+  (
+    cd "$BUNDLE_ROOT"
+    find . -type f ! -name 'SHA256SUMS.txt' -print | LC_ALL=C sort | while IFS= read -r file; do
+      shasum -a 256 "$file"
+    done
+  ) > "$BUNDLE_ROOT/SHA256SUMS.txt"
+else
+  echo "Either sha256sum or shasum is required to create bundle integrity metadata." >&2
+  exit 1
+fi
+
+echo "Bundle created at: $BUNDLE_ROOT"

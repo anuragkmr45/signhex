@@ -1,0 +1,10 @@
+release: production-example
+backend:
+  image_ref: ghcr.io/hexmon/signhex-server:1.2.3
+  image_archive: /artifacts/signhex-server-1.2.3.tar
+cms:
+  bundle_source: /artifacts/signhex-nexus-core-1.2.3.tgz
+player:
+  artifacts_dir: /artifacts/signage-screen/1.2.3
+notes:
+  - Production promotion should be a manifest change, not a source checkout deployment.
