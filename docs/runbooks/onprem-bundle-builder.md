@@ -99,7 +99,7 @@ Do not deploy a bundle that contains `*.SKIPPED.txt`.
 Preferred example using product export packages:
 
 ```bash
-bash scripts/export/package-server.sh --release 2026-04-02-r1
+bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
 bash scripts/export/package-cms.sh --release 2026-04-02-r1
 
 QA_HOST=10.30.0.40 \
@@ -113,6 +113,14 @@ CMS_PACKAGE_DIR=out/2026-04-02-r1/cms \
 PLAYER_ARTIFACTS_DIR=/artifacts/signage-screen/1.2.3 \
 bash scripts/bundle/assemble-runtime-bundle.sh site-a
 ```
+
+Use `--deployment-layout production-split` on the server export when the intended production topology is:
+
+- VM1: PostgreSQL + MinIO
+- VM2: backend API
+- VM3: CMS
+
+For QA and other all-in-one server-package workflows, keep the default `standalone` layout on `package-server.sh`.
 
 Fallback example using raw released artifacts:
 

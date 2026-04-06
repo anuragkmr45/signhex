@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/export/package-server.sh --release <release-id>
+  bash scripts/export/package-server.sh --release <release-id> [--deployment-layout standalone|production-split]
 
 Optional environment overrides:
   SERVER_REPO_DIR=/path/to/signhex-server
@@ -21,6 +21,7 @@ PLATFORM_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 RELEASE_ID=""
+DEPLOYMENT_LAYOUT="standalone"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +31,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release)
       RELEASE_ID="${2:-}"
+      shift 2
+      ;;
+    --deployment-layout)
+      DEPLOYMENT_LAYOUT="${2:-}"
       shift 2
       ;;
     *)
@@ -44,6 +49,16 @@ if [[ -z "$RELEASE_ID" ]]; then
   usage
   exit 1
 fi
+
+case "$DEPLOYMENT_LAYOUT" in
+  standalone|production-split)
+    ;;
+  *)
+    echo "Unsupported deployment layout: $DEPLOYMENT_LAYOUT" >&2
+    usage
+    exit 1
+    ;;
+esac
 
 SERVER_REPO_DIR="${SERVER_REPO_DIR:-$PLATFORM_ROOT/../signhex-server}"
 OUTPUT_BASE="${OUTPUT_BASE:-$PLATFORM_ROOT/out}"
@@ -82,6 +97,7 @@ docker save -o "$IMAGES_DIR/$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
 cat > "$OUTPUT_DIR/package.env" <<EOF
 PACKAGE_KIND=server
 RELEASE_ID=$RELEASE_ID
+SERVER_PACKAGE_LAYOUT=$DEPLOYMENT_LAYOUT
 SERVER_PACKAGE_BACKEND_IMAGE_REF=$BACKEND_IMAGE_REF
 SERVER_PACKAGE_BACKEND_IMAGE_ARCHIVE=images/$BACKEND_IMAGE_ARCHIVE_NAME
 SERVER_PACKAGE_POSTGRES_IMAGE_REF=$POSTGRES_IMAGE
@@ -245,6 +261,49 @@ cat > "$OUTPUT_DIR/README.md" <<EOF
 # Signhex Server Package
 
 This folder is a source-free server deploy package.
+
+## Deployment layout intent
+
+- requested layout: \`$DEPLOYMENT_LAYOUT\`
+EOF
+
+if [[ "$DEPLOYMENT_LAYOUT" == "production-split" ]]; then
+  cat >> "$OUTPUT_DIR/README.md" <<'EOF'
+
+This package still contains backend, PostgreSQL, and MinIO image archives together because the production bundle builder redistributes them into separate runtime folders.
+
+Use this package as an input to the production bundle builder when you want:
+
+- VM1: PostgreSQL + MinIO
+- VM2: backend API
+- VM3: CMS
+
+Canonical flow:
+
+```bash
+bash scripts/export/package-server.sh --release <release-id> --deployment-layout production-split
+bash scripts/export/package-cms.sh --release <release-id>
+
+SERVER_PACKAGE_DIR="out/<release-id>/server" \
+CMS_PACKAGE_DIR="out/<release-id>/cms" \
+PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/<release-id>" \
+bash scripts/bundle/assemble-runtime-bundle.sh --profile production <site-name>
+```
+
+The generated production bundle is what produces:
+
+- `production/data/`
+- `production/backend/`
+- `production/cms/`
+EOF
+else
+  cat >> "$OUTPUT_DIR/README.md" <<'EOF'
+
+This layout is intended for the all-in-one server package workflow where backend, PostgreSQL, and MinIO run from this folder on one host.
+EOF
+fi
+
+cat >> "$OUTPUT_DIR/README.md" <<'EOF'
 
 ## First-time setup
 

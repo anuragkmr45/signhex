@@ -143,7 +143,7 @@ Preferred build-machine flow:
 ```bash
 export RELEASE_ID="2026-04-02-r1"
 
-bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-server.sh --release "$RELEASE_ID" --deployment-layout production-split
 bash scripts/export/package-cms.sh --release "$RELEASE_ID"
 ```
 
@@ -495,7 +495,7 @@ export CMS_PUBLIC_HOST="10.20.0.30"
 export BACKEND_PRIVATE_HOST="10.20.0.20"
 export BACKEND_DEVICE_HOST="10.20.0.21"
 export DATA_PRIVATE_HOST="10.20.0.10"
-bash scripts/export/package-server.sh --release "$RELEASE_ID"
+bash scripts/export/package-server.sh --release "$RELEASE_ID" --deployment-layout production-split
 bash scripts/export/package-cms.sh --release "$RELEASE_ID"
 
 export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"

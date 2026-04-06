@@ -18,12 +18,26 @@ Run from `signhex-platform`:
 bash scripts/export/package-all.sh --release 2026-04-02-r1 --electron-platform linux
 ```
 
+Split-production variant:
+
+```bash
+bash scripts/export/package-all.sh --release 2026-04-02-r1 --electron-platform linux --server-deployment-layout production-split
+```
+
 ## Per-product commands
 
 Server:
 
 ```bash
 bash scripts/export/package-server.sh --release 2026-04-02-r1
+```
+
+This uses the default `standalone` layout and is appropriate for QA or all-in-one server-package workflows.
+
+Server for the split production layout (`VM1=data`, `VM2=backend`, `VM3=cms`):
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
 ```
 
 CMS:
@@ -55,6 +69,7 @@ bash scripts/export/package-electron.sh --release 2026-04-02-r1 --platform linux
   - `docker-compose.yml`
   - `.env.template`
   - `load-images.sh`, `init-env.sh`, `start.sh`, `stop.sh`, `update.sh`, `health-check.sh`
+  - `package.env` includes `SERVER_PACKAGE_LAYOUT` to record whether the package was exported for `standalone` or `production-split` intent
 - `out/<release>/cms/`
   - Docker image archive for `nginx`
   - built static assets in `www/`
@@ -86,6 +101,15 @@ SERVER_PACKAGE_DIR="out/2026-04-02-r1/server" \
 CMS_PACKAGE_DIR="out/2026-04-02-r1/cms" \
 PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/2026-04-02-r1" \
 bash scripts/bundle/assemble-runtime-bundle.sh --profile qa site-a-qa
+```
+
+For production, use the same exported `server/` package as input to the production bundle builder. The package still contains backend, PostgreSQL, and MinIO image archives together; the split into `production/data/` and `production/backend/` happens during runtime bundle assembly.
+
+Production-oriented export example:
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
+bash scripts/export/package-cms.sh --release 2026-04-02-r1
 ```
 
 `PLAYER_ARTIFACTS_DIR` must contain at least:

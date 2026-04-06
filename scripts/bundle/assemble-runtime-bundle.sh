@@ -1307,6 +1307,7 @@ This bundle was assembled from released runtime artifacts. Do not copy the sourc
 ## Product inputs
 
 - Server package dir: \`${SERVER_PACKAGE_DIR:-not provided}\`
+- Server package layout: \`${SERVER_PACKAGE_LAYOUT:-not provided}\`
 - CMS package dir: \`${CMS_PACKAGE_DIR:-not provided}\`
 - Backend image ref: \`$BACKEND_IMAGE_REF\`
 - Backend image archive: \`$(basename "$BACKEND_IMAGE_ARCHIVE")\`

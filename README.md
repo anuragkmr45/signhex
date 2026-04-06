@@ -55,12 +55,26 @@ Product export packaging:
 bash scripts/export/package-all.sh --release 2026-04-02-r1 --electron-platform linux
 ```
 
+Split-production variant:
+
+```bash
+bash scripts/export/package-all.sh --release 2026-04-02-r1 --electron-platform linux --server-deployment-layout production-split
+```
+
 Per-product exports:
 
 ```bash
 bash scripts/export/package-server.sh --release 2026-04-02-r1
 bash scripts/export/package-cms.sh --release 2026-04-02-r1
 bash scripts/export/package-electron.sh --release 2026-04-02-r1 --platform linux
+```
+
+The plain server export command uses the default `standalone` layout, which is appropriate for QA and other all-in-one server-package workflows.
+
+For the split production layout (`VM1=data`, `VM2=backend`, `VM3=cms`), export the server package with explicit intent:
+
+```bash
+bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
 ```
 
 Canonical artifact-driven bundle assembly:
@@ -72,7 +86,7 @@ bash scripts/bundle/assemble-runtime-bundle.sh <site-name>
 Preferred two-step flow:
 
 ```bash
-bash scripts/export/package-server.sh --release 2026-04-02-r1
+bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
 bash scripts/export/package-cms.sh --release 2026-04-02-r1
 
 SERVER_PACKAGE_DIR="out/2026-04-02-r1/server" \

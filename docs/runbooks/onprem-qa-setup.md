@@ -64,6 +64,12 @@ bash scripts/export/package-server.sh --release "$RELEASE_ID"
 bash scripts/export/package-cms.sh --release "$RELEASE_ID"
 ```
 
+QA layout note:
+
+- keep the default server export layout for QA
+- `package-server.sh` defaults to `--deployment-layout standalone`
+- do not use `--deployment-layout production-split` for the single-host QA topology in this runbook
+
 Expected result:
 
 - `out/$RELEASE_ID/server/`
