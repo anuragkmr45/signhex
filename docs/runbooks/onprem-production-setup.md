@@ -20,6 +20,7 @@ This guide assumes:
 - raw IPv4 addresses only
 - CMS served at `https://<cms-ip>`
 - backend and player traffic on `http://<backend-ip>:3000`
+- all hosts can reach each other over the same Wi-Fi, LAN, or private routed network
 - production layout:
   - `production/data/`
   - `production/backend/`
@@ -41,6 +42,48 @@ Recommended topology:
 - `Backend VM`: Ubuntu Server VM
 - `CMS guest`: small Ubuntu VM by default, or an unprivileged LXC only when Docker/Compose support is already prepared
 
+### Supported deployment layouts
+
+Primary supported production layout:
+
+- machine A: PostgreSQL + MinIO from `production/data/`
+- machine B: backend API from `production/backend/`
+- machine C: CMS from `production/cms/`
+- separate player machines on the same private network
+
+This is the default topology assumed by this runbook and by the generated production bundle.
+
+Supported network model:
+
+- same Wi-Fi or LAN is acceptable
+- direct Ethernet or patch-cord-connected private networks are acceptable
+- a routed private network is acceptable if the required ports below are reachable
+
+Reduced-host variation:
+
+- you may intentionally run backend and data services on the same Linux host for small deployments
+- in that case, set `BACKEND_PRIVATE_HOST` and `DATA_PRIVATE_HOST` to the same IPv4 address
+- keep `CMS_PUBLIC_HOST` on the CMS machine IP
+- keep `BACKEND_DEVICE_HOST` on the IP that player devices should use for `http://<backend-ip>:3000`
+
+This variation can work, but it is an adaptation of the standard production layout rather than the primary documented topology.
+
+### Required network reachability
+
+Confirm these paths before deployment:
+
+- admin browsers must reach `https://<cms-ip>:443`
+- CMS host must reach backend host on `3000/tcp`
+- backend host must reach data host on `5432/tcp` for PostgreSQL
+- backend host must reach data host on `9000/tcp` for MinIO
+- player devices must reach `http://<backend-device-ip>:3000`
+
+Optional:
+
+- operators may need access to MinIO console on `9001/tcp`
+
+If any of those paths are blocked by host firewalls, VM firewalls, or network ACLs, deployment will not function correctly even when the containers are healthy.
+
 ### Required inputs
 
 Collect these before you build the bundle:
@@ -61,6 +104,11 @@ Collect these before you build the bundle:
 - optional provided cert files if you are not using generated CMS TLS
 
 `PLAYER_ARTIFACTS_DIR` must contain the Windows and Ubuntu player installers to stage into `production/electron/`.
+
+Player platform note:
+
+- Windows and Ubuntu are the supported production player targets for this runbook
+- macOS is not an official production player target; treat it as development or local validation only
 
 ### Required tools on the build machine
 
