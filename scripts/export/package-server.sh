@@ -171,7 +171,7 @@ services:
         condition: service_healthy
     volumes:
       - ./certs:/app/certs:ro
-    command: npm start
+    command: npm run start:api
     healthcheck:
       test:
         [
@@ -183,6 +183,27 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  worker:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      HEXMON_RUNTIME_CONTAINER: "true"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm run start:worker
 
 volumes:
   signhex_server_postgres_data:
@@ -244,6 +265,7 @@ source ./.env
 docker compose --env-file .env exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT:-9000}/minio/health/live" >/dev/null
 curl -fsS "http://127.0.0.1:${API_HOST_PORT:-3000}/api/v1/health" >/dev/null
+docker compose --env-file .env ps --services --status running | grep -qx worker
 echo "Server package healthy."
 EOF
 
@@ -275,7 +297,7 @@ This package still contains backend, PostgreSQL, and MinIO image archives togeth
 Use this package as an input to the production bundle builder when you want:
 
 - VM1: PostgreSQL + MinIO
-- VM2: backend API
+- VM2: backend bundle running separate `api` and `worker` containers
 - VM3: CMS
 
 Canonical flow:
@@ -300,6 +322,11 @@ else
   cat >> "$OUTPUT_DIR/README.md" <<'EOF'
 
 This layout is intended for the all-in-one server package workflow where backend, PostgreSQL, and MinIO run from this folder on one host.
+
+It starts two backend containers from the same image:
+
+- `api`: HTTP and websocket runtime on port `3000`
+- `worker`: pg-boss handlers, media jobs, telemetry persistence, archive, and backup work
 EOF
 fi
 

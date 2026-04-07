@@ -870,7 +870,7 @@ services:
       - minio
     volumes:
       - ./certs:/app/certs:ro
-    command: npm start
+    command: npm run start:api
     healthcheck:
       test:
         [
@@ -882,6 +882,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  worker:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env.qa
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm run start:worker
 
 volumes:
   signhex_qa_postgres_data:
@@ -953,6 +965,7 @@ source ./.env.qa
 docker compose --env-file .env.qa exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT}/minio/health/live" >/dev/null
 curl -fsS "http://127.0.0.1:${API_HOST_PORT}/api/v1/health" >/dev/null
+docker compose --env-file .env.qa ps --services --status running | grep -qx worker
 echo "QA backend stack healthy."
 EOF
 
@@ -968,7 +981,7 @@ EOF
   cat > "$QA_BACKEND_DIR/README.md" <<EOF
 # QA Backend Host Bundle
 
-This folder runs the QA backend, PostgreSQL, and MinIO on one machine.
+This folder runs the QA backend bundle, PostgreSQL, and MinIO on one machine.
 
 ## Start
 
@@ -981,6 +994,7 @@ This folder runs the QA backend, PostgreSQL, and MinIO on one machine.
 ## Reachability
 
 - API: http://$QA_HOST:$QA_API_HOST_PORT
+- Worker: background jobs only, no public port
 - PostgreSQL: $QA_POSTGRES_HOST_PORT/tcp
 - MinIO API: $QA_MINIO_HOST_PORT/tcp
 - MinIO Console: $QA_MINIO_CONSOLE_PORT/tcp
@@ -1117,7 +1131,7 @@ services:
       - "${API_HOST_PORT}:3000"
     volumes:
       - ./certs:/app/certs:ro
-    command: npm start
+    command: npm run start:api
     healthcheck:
       test:
         [
@@ -1129,6 +1143,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  worker:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    volumes:
+      - ./certs:/app/certs:ro
+    command: npm run start:worker
 EOF
 
   cat > "$PROD_CMS_DIR/docker-compose.yml" <<'EOF'
@@ -1222,6 +1245,7 @@ EOF
 set -euo pipefail
 source ./.env.production
 curl -fsS "http://127.0.0.1:${API_HOST_PORT}/api/v1/health" >/dev/null
+docker compose --env-file .env.production ps --services --status running | grep -qx worker
 echo "Production backend healthy."
 EOF
 
@@ -1258,7 +1282,7 @@ EOF
   cat > "$PROD_BACKEND_DIR/README.md" <<EOF
 # Production Backend Bundle
 
-This folder runs the Signhex API only.
+This folder runs the Signhex backend bundle with separate `api` and `worker` containers from the same image.
 
 ## Start
 
@@ -1272,6 +1296,7 @@ This folder runs the Signhex API only.
 
 - API: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT
 - Player endpoint: http://$BACKEND_DEVICE_HOST:3000
+- Worker: background jobs only, no public port
 EOF
 
   cat > "$PROD_CMS_DIR/README.md" <<EOF

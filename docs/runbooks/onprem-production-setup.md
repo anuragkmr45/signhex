@@ -39,7 +39,7 @@ This guide assumes:
 Recommended topology:
 
 - `Data VM`: Ubuntu Server VM
-- `Backend VM`: Ubuntu Server VM
+- `Backend VM`: Ubuntu Server VM running separate `api` and `worker` containers from `production/backend/`
 - `CMS guest`: small Ubuntu VM by default, or an unprivileged LXC only when Docker/Compose support is already prepared
 
 ### Supported deployment layouts
@@ -47,7 +47,7 @@ Recommended topology:
 Primary supported production layout:
 
 - machine A: PostgreSQL + MinIO from `production/data/`
-- machine B: backend API from `production/backend/`
+- machine B: backend bundle from `production/backend/` running separate `api` and `worker` containers
 - machine C: CMS from `production/cms/`
 - separate player machines on the same private network
 
@@ -102,6 +102,8 @@ Collect these before you build the bundle:
   - `CMS_BUNDLE_SOURCE`
 - `PLAYER_ARTIFACTS_DIR`
 - optional provided cert files if you are not using generated CMS TLS
+
+No new bundle environment variables are required for the API/worker split. The generated backend compose file starts both containers automatically. `HEXMON_PROCESS_ROLE` is available only as an optional manual override when you run the backend image outside the generated compose files.
 
 `PLAYER_ARTIFACTS_DIR` must contain the Windows and Ubuntu player installers to stage into `production/electron/`.
 
@@ -310,6 +312,7 @@ curl -fsS "http://127.0.0.1:3000/api/v1/health"
 Expected result:
 
 - backend health endpoint returns success
+- both `api` and `worker` containers show as running in `docker compose ps`
 - `certs/ca.crt` exists
 
 ### CMS guest
@@ -454,7 +457,7 @@ docker compose --env-file .env.production logs --tail=200
 Check:
 
 - backend IP in `nginx/default.conf`
-- backend tier health
+- backend tier health, including the `worker` container
 - firewall between CMS and backend
 
 ### Backend is up but devices cannot connect

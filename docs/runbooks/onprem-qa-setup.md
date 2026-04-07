@@ -4,7 +4,7 @@ This is the primary QA deployment runbook for support teams.
 
 Use this guide when you need a source-free QA deployment with:
 
-- one QA machine running CMS + backend + PostgreSQL + MinIO
+- one QA machine running CMS + backend bundle + PostgreSQL + MinIO
 - separate player machines on the same Wi-Fi or LAN
 - CMS served at `http://<qa-ip>`
 - player devices pointing directly to `http://<qa-ip>:3000`
@@ -20,6 +20,11 @@ Generated QA bundle layout:
 - `qa/backend/`
 - `qa/cms/`
 - `qa/electron/`
+
+The generated `qa/backend/` compose file starts two backend containers from the same image:
+
+- `api` for HTTP/socket traffic on `3000`
+- `worker` for pg-boss handlers, media processing, telemetry persistence, and other background jobs
 
 ## 1. Before You Start
 
@@ -154,7 +159,7 @@ Expected result:
 
 ## 6. Start The QA Services
 
-### Start backend + PostgreSQL + MinIO
+### Start backend bundle + PostgreSQL + MinIO
 
 Run on the QA host:
 
@@ -168,7 +173,8 @@ docker compose --env-file .env.qa ps
 
 Expected result:
 
-- PostgreSQL, MinIO, and backend are healthy
+- PostgreSQL and MinIO are healthy
+- both `api` and `worker` containers are running in `docker compose ps`
 
 ### Start CMS
 
