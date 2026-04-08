@@ -1,0 +1,32 @@
+services:
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.3.1}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${DEV_PROMETHEUS_RETENTION_TIME:-7d}
+      - --storage.tsdb.wal-compression
+      - --web.enable-lifecycle
+    ports:
+      - "${DEV_PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../shared/observability/prometheus/rules:/etc/signhex/prometheus/rules:ro
+      - ./prometheus.players.local.json:/etc/signhex/prometheus/file-sd/players.targets.json:ro
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.0.2}
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SERVER_ROOT_URL: ${DEV_GRAFANA_ROOT_URL:-http://localhost:3001/grafana/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      PROMETHEUS_UPSTREAM_URL: http://prometheus:9090
+    ports:
+      - "${DEV_GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ../../shared/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../shared/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro

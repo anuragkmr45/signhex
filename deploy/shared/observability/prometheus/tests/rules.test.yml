@@ -1,0 +1,123 @@
+rule_files:
+  - ../rules/recording-rules.yml
+  - ../rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus",instance="127.0.0.1:9090",role="observability",site="dev"}'
+        values: "1+0x21"
+      - series: 'up{job="signhex-server",instance="10.0.0.20:3000",role="backend",site="dev"}'
+        values: "0+0x21"
+      - series: 'up{job="vm1-postgres",instance="10.0.0.10:9187",role="data",site="dev"}'
+        values: "1+0x21"
+      - series: 'up{job="vm1-minio",instance="10.0.0.10:9000",role="data",site="dev"}'
+        values: "1+0x21"
+      - series: 'node_memory_MemAvailable_bytes{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev"}'
+        values: "20+0x21"
+      - series: 'node_memory_MemTotal_bytes{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev"}'
+        values: "100+0x21"
+      - series: 'node_memory_MemAvailable_bytes{job="vm1-node",instance="10.0.0.10:9100",role="data",site="dev"}'
+        values: "15+0x21"
+      - series: 'node_memory_MemTotal_bytes{job="vm1-node",instance="10.0.0.10:9100",role="data",site="dev"}'
+        values: "100+0x21"
+      - series: 'node_filesystem_avail_bytes{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev",fstype="ext4",mountpoint="/",device="/dev/sda1"}'
+        values: "5+0x21"
+      - series: 'node_filesystem_size_bytes{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev",fstype="ext4",mountpoint="/",device="/dev/sda1"}'
+        values: "100+0x21"
+      - series: 'node_filesystem_avail_bytes{job="vm1-node",instance="10.0.0.10:9100",role="data",site="dev",fstype="ext4",mountpoint="/",device="/dev/sda1"}'
+        values: "10+0x21"
+      - series: 'node_filesystem_size_bytes{job="vm1-node",instance="10.0.0.10:9100",role="data",site="dev",fstype="ext4",mountpoint="/",device="/dev/sda1"}'
+        values: "100+0x21"
+      - series: 'node_cpu_seconds_total{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev",mode="idle",cpu="0"}'
+        values: "0+0x21"
+      - series: 'node_cpu_seconds_total{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev",mode="system",cpu="0"}'
+        values: "0+1x21"
+      - series: 'pg_up{job="vm1-postgres",instance="10.0.0.10:9187",role="data",site="dev"}'
+        values: "0+0x21"
+      - series: 'signhex_fleet_players_total{state="ACTIVE",site="dev"}'
+        values: "3+0x21"
+      - series: 'signhex_fleet_players_total{state="OFFLINE",site="dev"}'
+        values: "2+0x21"
+      - series: 'signhex_fleet_players_total{state="INACTIVE",site="dev"}'
+        values: "0+0x21"
+      - series: 'signhex_fleet_latest_heartbeat_age_seconds{site="dev"}'
+        values: "700+0x21"
+    promql_expr_test:
+      - expr: 'signhex:host_memory_utilization:ratio{job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="signhex:host_memory_utilization:ratio",job="vm2-node",instance="10.0.0.20:9100",role="backend",site="dev"}'
+            value: 0.8
+      - expr: 'signhex:fleet_offline_players_ratio{site="dev"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="signhex:fleet_offline_players_ratio",site="dev"}'
+            value: 0.4
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SignhexBackendMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              alertname: SignhexBackendMetricsUnavailable
+              instance: 10.0.0.20:3000
+              job: signhex-server
+              role: backend
+              severity: critical
+              site: dev
+              team: platform
+            exp_annotations:
+              summary: "Backend metrics are unavailable"
+              description: "signhex-server on 10.0.0.20:3000 has been unreachable for 5 minutes."
+      - eval_time: 20m
+        alertname: SignhexHostFilesystemHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: SignhexHostFilesystemHigh
+              instance: 10.0.0.20:9100
+              job: vm2-node
+              role: backend
+              severity: critical
+              site: dev
+              team: platform
+            exp_annotations:
+              summary: "Host filesystem utilization is high"
+              description: "vm2-node on 10.0.0.20:9100 has a filesystem above 90% utilization."
+      - eval_time: 20m
+        alertname: SignhexPostgresUnavailable
+        exp_alerts:
+          - exp_labels:
+              alertname: SignhexPostgresUnavailable
+              instance: 10.0.0.10:9187
+              job: vm1-postgres
+              role: data
+              severity: critical
+              site: dev
+              team: platform
+            exp_annotations:
+              summary: "PostgreSQL is unavailable"
+              description: "postgres_exporter can reach 10.0.0.10:9187, but PostgreSQL is reporting down."
+      - eval_time: 20m
+        alertname: SignhexFleetHeartbeatsStalled
+        exp_alerts:
+          - exp_labels:
+              alertname: SignhexFleetHeartbeatsStalled
+              severity: critical
+              site: dev
+              team: platform
+            exp_annotations:
+              summary: "Player fleet heartbeats are stalled"
+              description: "The backend has not recorded a fresh player heartbeat for more than 10 minutes."
+      - eval_time: 20m
+        alertname: SignhexFleetOfflinePlayersHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: SignhexFleetOfflinePlayersHigh
+              severity: warning
+              site: dev
+              team: platform
+            exp_annotations:
+              summary: "Offline player ratio is elevated"
+              description: "More than 25% of the known player fleet has been marked OFFLINE for 15 minutes."

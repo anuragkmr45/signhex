@@ -259,6 +259,20 @@ curl http://127.0.0.1:3300/healthz
 curl http://127.0.0.1:3300/metrics
 ```
 
+Player metrics stay localhost-bound by default. Enable remote scrape only by setting:
+
+```json
+"observability": {
+  "enabled": true,
+  "metricsEnabled": true,
+  "bindAddress": "0.0.0.0",
+  "port": 3300,
+  "allowRemoteAccess": true
+}
+```
+
+Apply that only on management networks where VM2 Prometheus is explicitly allowed to reach the player.
+
 ### Log Monitoring
 ```bash
 # Real-time logs
@@ -473,4 +487,3 @@ For deployment assistance:
 
 **Last Updated:** 2025-01-05
 **Version:** 1.0.0
-

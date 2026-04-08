@@ -10,6 +10,7 @@ The canonical workflow is artifact-driven:
 - server package in or backend image archive in
 - CMS package in or CMS build archive in
 - player installers in
+- observability configs, dashboards, and rules from `signhex-platform`
 - runtime bundle out
 
 Preferred inputs can come from product export packages:
@@ -27,6 +28,11 @@ Player artifacts are still staged through one directory:
 - `PLAYER_ARTIFACTS_DIR`
 
 Target QA and production machines receive only generated runtime folders, image archives, configs, and start scripts.
+
+Observability note:
+
+- runtime bundles now include host-local `observability/` folders with Prometheus, Grafana, Alertmanager, exporter, and player target template assets
+- runtime pulls are not acceptable for production; if images are not pre-staged into the bundle, follow the offline image-loading runbook
 
 ## Primary Command
 
@@ -69,7 +75,8 @@ The per-platform export folders under `out/<release>/electron/<platform>/` are f
 
 ## Required Environment Inputs
 
-- `QA_HOST` for `qa` and `all`
+- `QA_DATA_HOST`, `QA_BACKEND_HOST`, `QA_CMS_HOST` for `qa` and `all`
+- optional `QA_BACKEND_DEVICE_HOST` if players should not use `QA_BACKEND_HOST`
 - `CMS_PUBLIC_HOST`, `BACKEND_PRIVATE_HOST`, `BACKEND_DEVICE_HOST`, `DATA_PRIVATE_HOST` for `production` and `all`
 
 ## Profiles
@@ -102,7 +109,9 @@ Preferred example using product export packages:
 bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
 bash scripts/export/package-cms.sh --release 2026-04-02-r1
 
-QA_HOST=10.30.0.40 \
+QA_DATA_HOST=10.30.0.10 \
+QA_BACKEND_HOST=10.30.0.20 \
+QA_CMS_HOST=10.30.0.30 \
 CMS_PUBLIC_SCHEME=https \
 CMS_PUBLIC_HOST=10.20.0.30 \
 BACKEND_PRIVATE_HOST=10.20.0.20 \
@@ -120,12 +129,14 @@ Use `--deployment-layout production-split` on the server export when the intende
 - VM2: backend API
 - VM3: CMS
 
-For QA and other all-in-one server-package workflows, keep the default `standalone` layout on `package-server.sh`.
+For QA and production, use the split layout so the runtime bundle aligns with the approved VM1 / VM2 / VM3 topology.
 
 Fallback example using raw released artifacts:
 
 ```bash
-QA_HOST=10.30.0.40 \
+QA_DATA_HOST=10.30.0.10 \
+QA_BACKEND_HOST=10.30.0.20 \
+QA_CMS_HOST=10.30.0.30 \
 CMS_PUBLIC_SCHEME=https \
 CMS_PUBLIC_HOST=10.20.0.30 \
 BACKEND_PRIVATE_HOST=10.20.0.20 \
@@ -143,6 +154,7 @@ bash scripts/bundle/assemble-runtime-bundle.sh site-a
 ```text
 dist/onprem/<site-name>/
   qa/
+    data/
     backend/
     cms/
     electron/

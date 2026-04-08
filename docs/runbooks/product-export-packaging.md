@@ -32,7 +32,7 @@ Server:
 bash scripts/export/package-server.sh --release 2026-04-02-r1
 ```
 
-This uses the default `standalone` layout and is appropriate for QA or all-in-one server-package workflows.
+Use `--deployment-layout production-split` for both QA and production so the runtime bundle aligns with the approved VM1 / VM2 / VM3 topology.
 
 Server for the split production layout (`VM1=data`, `VM2=backend`, `VM3=cms`):
 
@@ -68,12 +68,14 @@ bash scripts/export/package-electron.sh --release 2026-04-02-r1 --platform linux
   - Docker image archives for `api`, `postgres`, and `minio`
   - `docker-compose.yml`
   - `.env.template`
+  - `observability/` with Prometheus, Alertmanager, exporter, and environment templates
   - `load-images.sh`, `init-env.sh`, `start.sh`, `stop.sh`, `update.sh`, `health-check.sh`
   - `package.env` includes `SERVER_PACKAGE_LAYOUT` to record whether the package was exported for `standalone` or `production-split` intent
 - `out/<release>/cms/`
   - Docker image archive for `nginx`
   - built static assets in `www/`
   - rendered-config template in `nginx/default.conf.template`
+  - `observability/` with Grafana provisioning and environment templates
   - `docker-compose.yml`
   - `.env.template`
   - `load-images.sh`, `init-env.sh`, `render-config.sh`, `start.sh`, `stop.sh`, `update.sh`, `health-check.sh`

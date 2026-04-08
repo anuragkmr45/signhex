@@ -1,0 +1,63 @@
+groups:
+  - name: signhex_host_utilization
+    interval: 1m
+    rules:
+      - record: signhex:host_cpu_utilization:ratio
+        expr: |
+          1 - avg by (job, instance, role, site) (
+            rate(node_cpu_seconds_total{mode="idle"}[5m])
+          )
+      - record: signhex:host_memory_utilization:ratio
+        expr: |
+          1 - (
+            node_memory_MemAvailable_bytes
+            /
+            node_memory_MemTotal_bytes
+          )
+      - record: signhex:host_filesystem_utilization:ratio
+        expr: |
+          max by (job, instance, role, site) (
+            1 - (
+              node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint!~"/run($|/.*)|/var/lib/docker($|/.*)"}
+              /
+              node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint!~"/run($|/.*)|/var/lib/docker($|/.*)"}
+            )
+          )
+
+  - name: signhex_backend_service
+    interval: 1m
+    rules:
+      - record: signhex:backend_http_request_rate_per_second
+        expr: |
+          sum by (site) (
+            rate(signhex_server_http_requests_total[5m])
+          )
+      - record: signhex:backend_http_error_rate:ratio
+        expr: |
+          sum by (site) (
+            rate(signhex_server_http_requests_total{status_class="5xx"}[5m])
+          )
+          /
+          clamp_min(
+            sum by (site) (
+              rate(signhex_server_http_requests_total[5m])
+            ),
+            1
+          )
+      - record: signhex:fleet_total_players
+        expr: |
+          sum by (site) (
+            signhex_fleet_players_total
+          )
+      - record: signhex:fleet_offline_players_ratio
+        expr: |
+          sum by (site) (
+            signhex_fleet_players_total{state="OFFLINE"}
+          )
+          /
+          clamp_min(
+            sum by (site) (
+              signhex_fleet_players_total
+            ),
+            1
+          )

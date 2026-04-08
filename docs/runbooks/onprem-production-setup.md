@@ -27,6 +27,12 @@ This guide assumes:
   - `production/cms/`
   - `production/electron/`
 
+Observability assets are staged alongside the runtime folders:
+
+- `production/data/observability/`
+- `production/backend/observability/`
+- `production/cms/observability/`
+
 ## 1. Before You Start
 
 ### Required hosts
@@ -77,6 +83,8 @@ Confirm these paths before deployment:
 - backend host must reach data host on `5432/tcp` for PostgreSQL
 - backend host must reach data host on `9000/tcp` for MinIO
 - player devices must reach `http://<backend-device-ip>:3000`
+- VM2 Prometheus must reach VM1, VM2, and VM3 exporter ports
+- VM3 nginx must reach local Grafana on the configured upstream port
 
 Optional:
 
@@ -357,6 +365,7 @@ Confirm:
 - dashboards load
 - API calls succeed
 - live socket-driven areas connect
+- `/grafana/` resolves through the same-origin VM3 reverse proxy after Grafana is started locally on VM3
 
 ### API checks
 

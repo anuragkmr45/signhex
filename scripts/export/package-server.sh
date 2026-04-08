@@ -69,6 +69,7 @@ MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
 OUTPUT_DIR="$OUTPUT_BASE/$RELEASE_ID/server"
 IMAGES_DIR="$OUTPUT_DIR/images"
 CERTS_DIR="$OUTPUT_DIR/certs"
+OBSERVABILITY_DIR="$OUTPUT_DIR/observability"
 
 export_require_command docker
 export_require_directory "Server repo" "$SERVER_REPO_DIR"
@@ -76,7 +77,7 @@ export_require_file "Server Dockerfile" "$SERVER_REPO_DIR/Dockerfile"
 export_require_file "Server env template" "$SERVER_REPO_DIR/.env.example"
 
 export_make_clean_dir "$OUTPUT_DIR"
-mkdir -p "$IMAGES_DIR" "$CERTS_DIR"
+mkdir -p "$IMAGES_DIR" "$CERTS_DIR" "$OBSERVABILITY_DIR"
 
 BACKEND_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$BACKEND_IMAGE_REF")"
 POSTGRES_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$POSTGRES_IMAGE")"
@@ -211,6 +212,14 @@ volumes:
 EOF
 
 export_write_load_images_script "$OUTPUT_DIR/load-images.sh"
+
+cp "$PLATFORM_ROOT/deploy/shared/observability/README.md" "$OBSERVABILITY_DIR/README.md"
+cp -R "$PLATFORM_ROOT/deploy/shared/observability/prometheus" "$OBSERVABILITY_DIR/prometheus"
+cp -R "$PLATFORM_ROOT/deploy/shared/observability/alertmanager" "$OBSERVABILITY_DIR/alertmanager"
+cp -R "$PLATFORM_ROOT/deploy/shared/observability/exporters" "$OBSERVABILITY_DIR/exporters"
+mkdir -p "$OBSERVABILITY_DIR/environments"
+cp -R "$PLATFORM_ROOT/deploy/qa/observability" "$OBSERVABILITY_DIR/environments/qa"
+cp -R "$PLATFORM_ROOT/deploy/production/observability" "$OBSERVABILITY_DIR/environments/production"
 
 cat > "$OUTPUT_DIR/init-env.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -359,6 +368,11 @@ PostgreSQL and MinIO data are stored in Docker named volumes:
 
 - \`signhex_server_postgres_data\`
 - \`signhex_server_minio_data\`
+
+## Observability assets
+
+- Prometheus, Alertmanager, and exporter templates are staged in \`observability/\`
+- environment examples for QA and production are staged in \`observability/environments/\`
 EOF
 
 chmod +x \

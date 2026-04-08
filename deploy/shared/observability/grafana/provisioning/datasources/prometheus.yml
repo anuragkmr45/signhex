@@ -1,0 +1,10 @@
+apiVersion: 1
+
+datasources:
+  - name: Signhex Prometheus
+    uid: signhex-prometheus
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_UPSTREAM_URL}
+    isDefault: true
+    editable: false

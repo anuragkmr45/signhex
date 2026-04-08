@@ -12,6 +12,7 @@ This repo owns:
 - release manifests
 - shared operational scripts
 - repository and access-control standards
+- observability standards, dashboards, rules, and deployment assets
 - non-product-code assets
 
 This repo does **not** own product source code. Product code remains in:
@@ -69,9 +70,9 @@ bash scripts/export/package-cms.sh --release 2026-04-02-r1
 bash scripts/export/package-electron.sh --release 2026-04-02-r1 --platform linux
 ```
 
-The plain server export command uses the default `standalone` layout, which is appropriate for QA and other all-in-one server-package workflows.
+The plain server export command still supports the legacy `standalone` layout, but the approved QA and production topology uses `production-split`.
 
-For the split production layout (`VM1=data`, `VM2=backend`, `VM3=cms`), export the server package with explicit intent:
+For the split QA and production layout (`VM1=data`, `VM2=backend`, `VM3=cms`), export the server package with explicit intent:
 
 ```bash
 bash scripts/export/package-server.sh --release 2026-04-02-r1 --deployment-layout production-split
@@ -118,6 +119,7 @@ assets/      Diagrams, templates, and non-product support assets
 - bundle workflow: `docs/runbooks/onprem-bundle-builder.md`
 - QA deployment: `docs/runbooks/onprem-qa-setup.md`
 - production deployment: `docs/runbooks/onprem-production-setup.md`
+- observability install/upgrade: `docs/runbooks/observability-stack-install-and-upgrade.md`
 
 ## Commit Rules
 

@@ -52,6 +52,7 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 NGINX_DIR="$OUTPUT_DIR/nginx"
 WWW_DIR="$OUTPUT_DIR/www"
 TEMPLATE_SOURCE="$PLATFORM_ROOT/deploy/shared/cms-nginx.default.conf.template"
+OBSERVABILITY_DIR="$OUTPUT_DIR/observability"
 
 export_require_command docker
 export_require_command npm
@@ -62,7 +63,7 @@ export_require_file "CMS nginx template" "$TEMPLATE_SOURCE"
 
 export_ensure_npm_dependencies "$CMS_REPO_DIR"
 export_make_clean_dir "$OUTPUT_DIR"
-mkdir -p "$IMAGES_DIR" "$NGINX_DIR" "$WWW_DIR"
+mkdir -p "$IMAGES_DIR" "$NGINX_DIR" "$WWW_DIR" "$OBSERVABILITY_DIR"
 
 NGINX_IMAGE_ARCHIVE_NAME="$(export_image_archive_name "$NGINX_IMAGE")"
 
@@ -95,9 +96,15 @@ NGINX_IMAGE=$NGINX_IMAGE
 CMS_HTTP_PORT=8080
 BACKEND_UPSTREAM_HOST=127.0.0.1
 BACKEND_UPSTREAM_PORT=3000
+GRAFANA_UPSTREAM_HOST=127.0.0.1
+GRAFANA_UPSTREAM_PORT=3001
 EOF
 
 cp "$TEMPLATE_SOURCE" "$NGINX_DIR/default.conf.template"
+cp -R "$PLATFORM_ROOT/deploy/shared/observability/grafana" "$OBSERVABILITY_DIR/grafana"
+mkdir -p "$OBSERVABILITY_DIR/environments"
+cp -R "$PLATFORM_ROOT/deploy/qa/observability" "$OBSERVABILITY_DIR/environments/qa"
+cp -R "$PLATFORM_ROOT/deploy/production/observability" "$OBSERVABILITY_DIR/environments/production"
 
 cat > "$OUTPUT_DIR/docker-compose.yml" <<'EOF'
 services:
@@ -125,6 +132,8 @@ mkdir -p nginx
 sed \
   -e "s/__BACKEND_UPSTREAM_HOST__/${BACKEND_UPSTREAM_HOST}/g" \
   -e "s/__BACKEND_UPSTREAM_PORT__/${BACKEND_UPSTREAM_PORT}/g" \
+  -e "s/__GRAFANA_UPSTREAM_HOST__/${GRAFANA_UPSTREAM_HOST}/g" \
+  -e "s/__GRAFANA_UPSTREAM_PORT__/${GRAFANA_UPSTREAM_PORT}/g" \
   nginx/default.conf.template > nginx/default.conf
 
 echo "Rendered nginx/default.conf"
@@ -210,6 +219,7 @@ This folder is a source-free CMS deploy package built as static assets behind Do
 - edit \`.env\` to point nginx at the backend host
 - static assets are in \`www/\`
 - nginx config is rendered from \`nginx/default.conf.template\`
+- Grafana provisioning and dashboards are staged in \`observability/grafana/\`
 EOF
 
 chmod +x \

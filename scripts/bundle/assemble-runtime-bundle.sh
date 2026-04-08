@@ -21,7 +21,10 @@ Required artifact inputs:
   PLAYER_ARTIFACTS_DIR=/path/to/player-release
 
 Required environment inputs:
-  QA_HOST=10.20.0.40                          # required for profile all|qa
+  QA_DATA_HOST=10.30.0.10                     # required for profile all|qa
+  QA_BACKEND_HOST=10.30.0.20                  # required for profile all|qa
+  QA_CMS_HOST=10.30.0.30                      # required for profile all|qa
+  QA_BACKEND_DEVICE_HOST=10.30.0.20           # optional for profile all|qa, defaults to QA_BACKEND_HOST
   CMS_PUBLIC_SCHEME=https                     # required for production, defaults to https
   CMS_PUBLIC_HOST=10.20.0.30                  # required for profile all|production
   BACKEND_PRIVATE_HOST=10.20.0.20             # required for profile all|production
@@ -42,7 +45,9 @@ Optional operational inputs:
   NGINX_IMAGE=nginx:1.27-alpine
 
 Example:
-  QA_HOST=10.30.0.40 \
+  QA_DATA_HOST=10.30.0.10 \
+  QA_BACKEND_HOST=10.30.0.20 \
+  QA_CMS_HOST=10.30.0.30 \
   CMS_PUBLIC_SCHEME=https \
   CMS_PUBLIC_HOST=10.20.0.30 \
   BACKEND_PRIVATE_HOST=10.20.0.20 \
@@ -346,6 +351,53 @@ docker compose --env-file $env_file down
 EOF
 }
 
+copy_tree_contents() {
+  local source_dir="$1"
+  local destination_dir="$2"
+  mkdir -p "$destination_dir"
+  cp -R "$source_dir/." "$destination_dir/"
+}
+
+write_observability_images_readme() {
+  local destination="$1"
+  cat > "$destination" <<'EOF'
+# Observability Images
+
+Stage pre-loaded image archives for Prometheus, Grafana, Alertmanager, and exporters in this directory when your release process bundles them.
+
+Production and QA targets must not depend on runtime `docker pull`.
+EOF
+}
+
+stage_observability_assets() {
+  local environment_name="$1"
+  local data_dir="$2"
+  local backend_dir="$3"
+  local cms_dir="$4"
+
+  mkdir -p \
+    "$data_dir/observability/images" \
+    "$backend_dir/observability/images" \
+    "$cms_dir/observability/images"
+
+  copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/exporters" "$data_dir/observability/exporters"
+  copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/exporters" "$backend_dir/observability/exporters"
+  copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/prometheus" "$backend_dir/observability/prometheus"
+  copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/alertmanager" "$backend_dir/observability/alertmanager"
+  copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/grafana" "$cms_dir/observability/grafana"
+
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/README.md" "$backend_dir/observability/README.md"
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/bundle.env.example" "$backend_dir/observability/.env.observability.example"
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/README.md" "$data_dir/observability/README.md"
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/bundle.env.example" "$data_dir/observability/.env.observability.example"
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/README.md" "$cms_dir/observability/README.md"
+  cp "$PLATFORM_ROOT/deploy/$environment_name/observability/bundle.env.example" "$cms_dir/observability/.env.observability.example"
+
+  write_observability_images_readme "$data_dir/observability/images/README.md"
+  write_observability_images_readme "$backend_dir/observability/images/README.md"
+  write_observability_images_readme "$cms_dir/observability/images/README.md"
+}
+
 TEMP_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signhex-platform.XXXXXX")"
 cleanup_temp_work_dir() {
   rm -rf "$TEMP_WORK_DIR"
@@ -374,6 +426,10 @@ if [[ -n "$CMS_PACKAGE_DIR" ]]; then
 fi
 
 QA_HOST="${QA_HOST:-}"
+QA_DATA_HOST="${QA_DATA_HOST:-$QA_HOST}"
+QA_BACKEND_HOST="${QA_BACKEND_HOST:-$QA_HOST}"
+QA_BACKEND_DEVICE_HOST="${QA_BACKEND_DEVICE_HOST:-$QA_BACKEND_HOST}"
+QA_CMS_HOST="${QA_CMS_HOST:-$QA_HOST}"
 CMS_PUBLIC_SCHEME="${CMS_PUBLIC_SCHEME:-https}"
 CMS_PUBLIC_HOST="${CMS_PUBLIC_HOST:-}"
 BACKEND_PRIVATE_HOST="${BACKEND_PRIVATE_HOST:-}"
@@ -395,6 +451,8 @@ PLAYER_ARTIFACTS_DIR="${PLAYER_ARTIFACTS_DIR:-}"
 
 QA_CMS_HTTP_PORT="${QA_CMS_HTTP_PORT:-80}"
 QA_API_HOST_PORT="${QA_API_HOST_PORT:-3000}"
+QA_PROMETHEUS_HOST_PORT="${QA_PROMETHEUS_HOST_PORT:-9090}"
+QA_GRAFANA_UPSTREAM_PORT="${QA_GRAFANA_UPSTREAM_PORT:-3001}"
 QA_POSTGRES_HOST_PORT="${QA_POSTGRES_HOST_PORT:-5432}"
 QA_MINIO_HOST_PORT="${QA_MINIO_HOST_PORT:-9000}"
 QA_MINIO_CONSOLE_PORT="${QA_MINIO_CONSOLE_PORT:-9001}"
@@ -462,7 +520,10 @@ STORAGE_QUOTA_BYTES="${STORAGE_QUOTA_BYTES:-0}"
 OUTPUT_BASE="${OUTPUT_BASE:-$PLATFORM_ROOT/dist/onprem}"
 
 if profile_enabled qa; then
-  require_ipv4 "QA_HOST" "$QA_HOST"
+  require_ipv4 "QA_DATA_HOST" "$QA_DATA_HOST"
+  require_ipv4 "QA_BACKEND_HOST" "$QA_BACKEND_HOST"
+  require_ipv4 "QA_CMS_HOST" "$QA_CMS_HOST"
+  require_ipv4 "QA_BACKEND_DEVICE_HOST" "$QA_BACKEND_DEVICE_HOST"
 fi
 
 if profile_enabled production; then
@@ -524,7 +585,7 @@ fi
 CMS_QA_ORIGIN=""
 CMS_PRODUCTION_ORIGIN=""
 if profile_enabled qa; then
-  CMS_QA_ORIGIN="$(build_origin "http" "$QA_HOST" "$QA_CMS_HTTP_PORT")"
+  CMS_QA_ORIGIN="$(build_origin "http" "$QA_CMS_HOST" "$QA_CMS_HTTP_PORT")"
 fi
 if profile_enabled production; then
   CMS_PRODUCTION_ORIGIN="$(build_origin "$CMS_PUBLIC_SCHEME" "$CMS_PUBLIC_HOST" "$CMS_HTTPS_PORT")"
@@ -533,6 +594,7 @@ fi
 BUNDLE_ROOT="$OUTPUT_BASE/$SITE_NAME"
 QA_ROOT="$BUNDLE_ROOT/qa"
 PRODUCTION_ROOT="$BUNDLE_ROOT/production"
+QA_DATA_DIR="$QA_ROOT/data"
 QA_BACKEND_DIR="$QA_ROOT/backend"
 QA_CMS_DIR="$QA_ROOT/cms"
 QA_ELECTRON_DIR="$QA_ROOT/electron"
@@ -546,6 +608,7 @@ mkdir -p "$BUNDLE_ROOT"
 
 if profile_enabled qa; then
   mkdir -p \
+    "$QA_DATA_DIR/images" \
     "$QA_BACKEND_DIR/images" \
     "$QA_BACKEND_DIR/certs" \
     "$QA_CMS_DIR/images" \
@@ -597,14 +660,14 @@ fi
 
 if [[ -n "$POSTGRES_PACKAGE_ARCHIVE" ]]; then
   if profile_enabled qa; then
-    copy_archive_to_targets "$POSTGRES_PACKAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$POSTGRES_PACKAGE_ARCHIVE" "$QA_DATA_DIR/images"
   fi
   if profile_enabled production; then
     copy_archive_to_targets "$POSTGRES_PACKAGE_ARCHIVE" "$PROD_DATA_DIR/images"
   fi
 elif [[ "$SKIP_DOCKER" == "true" ]]; then
   if profile_enabled qa; then
-    write_skip_placeholder "$QA_BACKEND_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
+    write_skip_placeholder "$QA_DATA_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
   fi
   if profile_enabled production; then
     write_skip_placeholder "$PROD_DATA_DIR/images" "$POSTGRES_IMAGE_ARCHIVE_NAME" "$POSTGRES_IMAGE"
@@ -614,7 +677,7 @@ else
   docker image inspect "$POSTGRES_IMAGE" >/dev/null 2>&1 || docker pull "$POSTGRES_IMAGE"
   docker save -o "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$POSTGRES_IMAGE"
   if profile_enabled qa; then
-    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$QA_DATA_DIR/images"
   fi
   if profile_enabled production; then
     copy_archive_to_targets "$POSTGRES_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
@@ -623,14 +686,14 @@ fi
 
 if [[ -n "$MINIO_PACKAGE_ARCHIVE" ]]; then
   if profile_enabled qa; then
-    copy_archive_to_targets "$MINIO_PACKAGE_ARCHIVE" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$MINIO_PACKAGE_ARCHIVE" "$QA_DATA_DIR/images"
   fi
   if profile_enabled production; then
     copy_archive_to_targets "$MINIO_PACKAGE_ARCHIVE" "$PROD_DATA_DIR/images"
   fi
 elif [[ "$SKIP_DOCKER" == "true" ]]; then
   if profile_enabled qa; then
-    write_skip_placeholder "$QA_BACKEND_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
+    write_skip_placeholder "$QA_DATA_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
   fi
   if profile_enabled production; then
     write_skip_placeholder "$PROD_DATA_DIR/images" "$MINIO_IMAGE_ARCHIVE_NAME" "$MINIO_IMAGE"
@@ -640,7 +703,7 @@ else
   docker image inspect "$MINIO_IMAGE" >/dev/null 2>&1 || docker pull "$MINIO_IMAGE"
   docker save -o "$MINIO_IMAGE_ARCHIVE_TEMP" "$MINIO_IMAGE"
   if profile_enabled qa; then
-    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$QA_BACKEND_DIR/images"
+    copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$QA_DATA_DIR/images"
   fi
   if profile_enabled production; then
     copy_archive_to_targets "$MINIO_IMAGE_ARCHIVE_TEMP" "$PROD_DATA_DIR/images"
@@ -685,7 +748,7 @@ CERTS_OUTPUT_DIR="$TEMP_WORK_DIR/generated-certs"
 BACKEND_CA_SOURCE_FILE=""
 
 if [[ "$ONPREM_CERT_MODE" == "generate" ]]; then
-  CERT_HOST="$QA_HOST"
+  CERT_HOST="$QA_CMS_HOST"
   if profile_enabled production; then
     CERT_HOST="$CMS_PUBLIC_HOST"
   fi
@@ -774,14 +837,17 @@ EOF
 fi
 
 if profile_enabled qa; then
-  cat > "$QA_BACKEND_DIR/.env.qa" <<EOF
-BACKEND_IMAGE=$BACKEND_IMAGE_REF
+  stage_observability_assets "qa" "$QA_DATA_DIR" "$QA_BACKEND_DIR" "$QA_CMS_DIR"
+fi
+
+if profile_enabled production; then
+  stage_observability_assets "production" "$PROD_DATA_DIR" "$PROD_BACKEND_DIR" "$PROD_CMS_DIR"
+fi
+
+if profile_enabled qa; then
+  cat > "$QA_DATA_DIR/.env.qa" <<EOF
 POSTGRES_IMAGE=$POSTGRES_IMAGE
 MINIO_IMAGE=$MINIO_IMAGE
-NODE_ENV=production
-HOST=$HOST
-PORT=$PORT
-API_HOST_PORT=$QA_API_HOST_PORT
 POSTGRES_USER=$POSTGRES_USER
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 POSTGRES_DB=$POSTGRES_DB
@@ -790,11 +856,21 @@ MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
 MINIO_SECRET_KEY=$MINIO_SECRET_KEY
 MINIO_HOST_PORT=$QA_MINIO_HOST_PORT
 MINIO_CONSOLE_PORT=$QA_MINIO_CONSOLE_PORT
-DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB
+EOF
+
+  cat > "$QA_BACKEND_DIR/.env.qa" <<EOF
+BACKEND_IMAGE=$BACKEND_IMAGE_REF
+NODE_ENV=production
+HOST=$HOST
+PORT=$PORT
+API_HOST_PORT=$QA_API_HOST_PORT
+DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@$QA_DATA_HOST:5432/$POSTGRES_DB
 JWT_SECRET=$JWT_SECRET
 JWT_EXPIRY=$JWT_EXPIRY
-MINIO_ENDPOINT=minio
+MINIO_ENDPOINT=$QA_DATA_HOST
 MINIO_PORT=9000
+MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
+MINIO_SECRET_KEY=$MINIO_SECRET_KEY
 MINIO_USE_SSL=$MINIO_USE_SSL
 MINIO_REGION=$MINIO_REGION
 ADMIN_EMAIL=$ADMIN_EMAIL
@@ -822,16 +898,19 @@ MAX_UPLOAD_MB=$MAX_UPLOAD_MB
 STORAGE_QUOTA_BYTES=$STORAGE_QUOTA_BYTES
 HEXMON_RUNTIME_CONTAINER=true
 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+PROMETHEUS_HOST_PORT=$QA_PROMETHEUS_HOST_PORT
 EOF
 
   cat > "$QA_CMS_DIR/.env.qa" <<EOF
 NGINX_IMAGE=$NGINX_IMAGE
-QA_HOST=$QA_HOST
 QA_CMS_HTTP_PORT=$QA_CMS_HTTP_PORT
-QA_API_HOST_PORT=$QA_API_HOST_PORT
+BACKEND_UPSTREAM_HOST=$QA_BACKEND_HOST
+BACKEND_UPSTREAM_PORT=$QA_API_HOST_PORT
+GRAFANA_UPSTREAM_HOST=127.0.0.1
+GRAFANA_UPSTREAM_PORT=$QA_GRAFANA_UPSTREAM_PORT
 EOF
 
-  cat > "$QA_BACKEND_DIR/docker-compose.yml" <<'EOF'
+  cat > "$QA_DATA_DIR/docker-compose.yml" <<'EOF'
 services:
   postgres:
     image: ${POSTGRES_IMAGE}
@@ -844,6 +923,11 @@ services:
       - "${POSTGRES_HOST_PORT}:5432"
     volumes:
       - signhex_qa_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
     image: ${MINIO_IMAGE}
@@ -857,7 +941,19 @@ services:
       - "${MINIO_CONSOLE_PORT}:9001"
     volumes:
       - signhex_qa_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+volumes:
+  signhex_qa_postgres_data:
+  signhex_qa_minio_data:
+EOF
+
+  cat > "$QA_BACKEND_DIR/docker-compose.yml" <<'EOF'
+services:
   api:
     image: ${BACKEND_IMAGE}
     restart: unless-stopped
@@ -865,9 +961,6 @@ services:
       - .env.qa
     ports:
       - "${API_HOST_PORT}:3000"
-    depends_on:
-      - postgres
-      - minio
     volumes:
       - ./certs:/app/certs:ro
     command: npm run start:api
@@ -888,16 +981,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env.qa
-    depends_on:
-      - postgres
-      - minio
     volumes:
       - ./certs:/app/certs:ro
     command: npm run start:worker
-
-volumes:
-  signhex_qa_postgres_data:
-  signhex_qa_minio_data:
 EOF
 
   cat > "$QA_CMS_DIR/docker-compose.yml" <<'EOF'
@@ -912,58 +998,36 @@ services:
       - ./www:/usr/share/nginx/html:ro
 EOF
 
-  cat > "$QA_CMS_DIR/nginx/default.conf" <<EOF
-server {
-  listen 80;
-  server_name _;
+  sed \
+    -e "s/__BACKEND_UPSTREAM_HOST__/$QA_BACKEND_HOST/g" \
+    -e "s/__BACKEND_UPSTREAM_PORT__/$QA_API_HOST_PORT/g" \
+    -e "s/__GRAFANA_UPSTREAM_HOST__/127.0.0.1/g" \
+    -e "s/__GRAFANA_UPSTREAM_PORT__/$QA_GRAFANA_UPSTREAM_PORT/g" \
+    "$PLATFORM_ROOT/deploy/shared/cms-nginx.default.conf.template" > "$QA_CMS_DIR/nginx/default.conf"
 
-  root /usr/share/nginx/html;
-  index index.html;
-
-  add_header X-Content-Type-Options "nosniff" always;
-  add_header X-Frame-Options "DENY" always;
-
-  location /api/v1/ {
-    proxy_pass http://$QA_HOST:3000/api/v1/;
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-  }
-
-  location /socket.io/ {
-    proxy_pass http://$QA_HOST:3000/socket.io/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 600s;
-  }
-
-  location / {
-    try_files \$uri \$uri/ /index.html;
-    add_header Cache-Control "no-store";
-  }
-}
-EOF
-
+  write_load_images_script "$QA_DATA_DIR/load-images.sh"
   write_load_images_script "$QA_BACKEND_DIR/load-images.sh"
   write_load_images_script "$QA_CMS_DIR/load-images.sh"
+  write_start_script "$QA_DATA_DIR/start.sh" ".env.qa"
   write_start_script "$QA_BACKEND_DIR/start.sh" ".env.qa"
   write_start_script "$QA_CMS_DIR/start.sh" ".env.qa"
+  write_stop_script "$QA_DATA_DIR/stop.sh" ".env.qa"
   write_stop_script "$QA_BACKEND_DIR/stop.sh" ".env.qa"
   write_stop_script "$QA_CMS_DIR/stop.sh" ".env.qa"
 
-  cat > "$QA_BACKEND_DIR/health-check.sh" <<'EOF'
+  cat > "$QA_DATA_DIR/health-check.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 source ./.env.qa
 docker compose --env-file .env.qa exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 curl -fsS "http://127.0.0.1:${MINIO_HOST_PORT}/minio/health/live" >/dev/null
+echo "QA data stack healthy."
+EOF
+
+  cat > "$QA_BACKEND_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.qa
 curl -fsS "http://127.0.0.1:${API_HOST_PORT}/api/v1/health" >/dev/null
 docker compose --env-file .env.qa ps --services --status running | grep -qx worker
 echo "QA backend stack healthy."
@@ -978,10 +1042,10 @@ curl -fsS "http://127.0.0.1:${QA_CMS_HTTP_PORT}/api/v1/health" >/dev/null
 echo "QA CMS healthy."
 EOF
 
-  cat > "$QA_BACKEND_DIR/README.md" <<EOF
-# QA Backend Host Bundle
+  cat > "$QA_DATA_DIR/README.md" <<EOF
+# QA Data Bundle
 
-This folder runs the QA backend bundle, PostgreSQL, and MinIO on one machine.
+This folder runs PostgreSQL and MinIO on the QA data VM.
 
 ## Start
 
@@ -993,17 +1057,15 @@ This folder runs the QA backend bundle, PostgreSQL, and MinIO on one machine.
 
 ## Reachability
 
-- API: http://$QA_HOST:$QA_API_HOST_PORT
-- Worker: background jobs only, no public port
 - PostgreSQL: $QA_POSTGRES_HOST_PORT/tcp
 - MinIO API: $QA_MINIO_HOST_PORT/tcp
 - MinIO Console: $QA_MINIO_CONSOLE_PORT/tcp
 EOF
 
-  cat > "$QA_CMS_DIR/README.md" <<EOF
-# QA CMS Bundle
+  cat > "$QA_BACKEND_DIR/README.md" <<EOF
+# QA Backend Bundle
 
-This folder runs the prebuilt CMS through Nginx on the QA host.
+This folder runs the QA backend bundle on VM2.
 
 ## Start
 
@@ -1015,11 +1077,33 @@ This folder runs the prebuilt CMS through Nginx on the QA host.
 
 ## Reachability
 
-- CMS: http://$QA_HOST:$QA_CMS_HTTP_PORT
-- API/socket traffic proxy to: http://$QA_HOST:$QA_API_HOST_PORT
+- API: http://$QA_BACKEND_HOST:$QA_API_HOST_PORT
+- Player endpoint: http://$QA_BACKEND_DEVICE_HOST:3000
+- Worker: background jobs only, no public port
+- Prometheus assets: \`./observability/prometheus/\`
 EOF
 
-  stage_player_bundle "$QA_ELECTRON_DIR" "qa" "$QA_HOST" "QA_SETUP_GUIDE.md"
+  cat > "$QA_CMS_DIR/README.md" <<EOF
+# QA CMS Bundle
+
+This folder runs the prebuilt CMS through Nginx on the QA CMS VM.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- CMS: http://$QA_CMS_HOST:$QA_CMS_HTTP_PORT
+- API/socket proxy target: http://$QA_BACKEND_HOST:$QA_API_HOST_PORT
+- Grafana path: http://$QA_CMS_HOST:$QA_CMS_HTTP_PORT/grafana/
+EOF
+
+  stage_player_bundle "$QA_ELECTRON_DIR" "qa" "$QA_BACKEND_DEVICE_HOST" "QA_SETUP_GUIDE.md"
   cp "$RUNBOOKS_DIR/onprem-qa-setup.md" "$QA_ROOT/QA_SETUP_GUIDE.md"
 fi
 
@@ -1086,6 +1170,8 @@ CMS_PUBLIC_ORIGIN=$CMS_PRODUCTION_ORIGIN
 CMS_HTTP_PORT=$CMS_HTTP_PORT
 CMS_HTTPS_PORT=$CMS_HTTPS_PORT
 BACKEND_PRIVATE_HOST=$BACKEND_PRIVATE_HOST
+GRAFANA_UPSTREAM_HOST=127.0.0.1
+GRAFANA_UPSTREAM_PORT=3001
 EOF
 
   cat > "$PROD_DATA_DIR/docker-compose.yml" <<'EOF'
@@ -1214,6 +1300,19 @@ server {
     proxy_read_timeout 600s;
   }
 
+  location /grafana/ {
+    proxy_pass http://127.0.0.1:3001/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Prefix /grafana;
+    proxy_read_timeout 600s;
+  }
+
   location / {
     try_files \$uri \$uri/ /index.html;
     add_header Cache-Control "no-store";
@@ -1277,6 +1376,7 @@ This folder runs PostgreSQL and MinIO only.
 - PostgreSQL: $POSTGRES_HOST_PORT/tcp
 - MinIO API: $MINIO_HOST_PORT/tcp
 - MinIO Console: $MINIO_CONSOLE_PORT/tcp
+- Observability templates: ./observability/
 EOF
 
   cat > "$PROD_BACKEND_DIR/README.md" <<EOF
@@ -1297,6 +1397,7 @@ This folder runs the Signhex backend bundle with separate `api` and `worker` con
 - API: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT
 - Player endpoint: http://$BACKEND_DEVICE_HOST:3000
 - Worker: background jobs only, no public port
+- Prometheus templates: ./observability/prometheus/
 EOF
 
   cat > "$PROD_CMS_DIR/README.md" <<EOF
@@ -1316,6 +1417,7 @@ This folder runs the prebuilt CMS through Nginx with HTTPS termination.
 
 - CMS: $CMS_PRODUCTION_ORIGIN
 - API/socket proxy target: http://$BACKEND_PRIVATE_HOST:3000
+- Grafana path: $CMS_PRODUCTION_ORIGIN/grafana/
 EOF
 
   stage_player_bundle "$PROD_ELECTRON_DIR" "production" "$BACKEND_DEVICE_HOST" "PRODUCTION_SETUP_GUIDE.md"
@@ -1356,9 +1458,12 @@ if profile_enabled qa; then
   cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
 
 - QA
-  - CMS: http://$QA_HOST:$QA_CMS_HTTP_PORT
-  - backend/player: http://$QA_HOST:$QA_API_HOST_PORT
+  - data: http://$QA_DATA_HOST:$QA_MINIO_HOST_PORT (MinIO API)
+  - backend: http://$QA_BACKEND_HOST:$QA_API_HOST_PORT
+  - player endpoint: http://$QA_BACKEND_DEVICE_HOST:3000
+  - CMS: http://$QA_CMS_HOST:$QA_CMS_HTTP_PORT
   - folders:
+    - \`qa/data/\`
     - \`qa/backend/\`
     - \`qa/cms/\`
     - \`qa/electron/\`
@@ -1402,7 +1507,9 @@ cat > "$BUNDLE_ROOT/PROXMOX_SIZING.md" <<'EOF'
 ## Recommended topology
 
 - QA:
-  - one QA host for CMS + backend + PostgreSQL + MinIO
+  - Data VM
+  - Backend VM
+  - CMS VM
   - separate player machines on the same network
 - Production:
   - Data VM
@@ -1449,6 +1556,10 @@ chmod +x "$BUNDLE_ROOT/verify-bundle.sh"
 
 if profile_enabled qa; then
   chmod +x \
+    "$QA_DATA_DIR/load-images.sh" \
+    "$QA_DATA_DIR/start.sh" \
+    "$QA_DATA_DIR/stop.sh" \
+    "$QA_DATA_DIR/health-check.sh" \
     "$QA_BACKEND_DIR/load-images.sh" \
     "$QA_BACKEND_DIR/start.sh" \
     "$QA_BACKEND_DIR/stop.sh" \

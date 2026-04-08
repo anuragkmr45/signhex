@@ -1,0 +1,20 @@
+[server]
+domain = __CMS_PUBLIC_HOST__
+root_url = __GRAFANA_ROOT_URL__
+serve_from_sub_path = true
+
+[security]
+allow_embedding = true
+cookie_secure = __GRAFANA_COOKIE_SECURE__
+cookie_samesite = lax
+x_content_type_options = true
+x_xss_protection = true
+
+[users]
+default_theme = light
+
+[auth.anonymous]
+enabled = false
+
+[dashboards]
+default_home_dashboard_path = /var/lib/grafana/dashboards/backend-service.json

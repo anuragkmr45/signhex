@@ -1,0 +1,32 @@
+global:
+  resolve_timeout: 5m
+
+templates:
+  - /etc/signhex/alertmanager/templates/*.tmpl
+
+# Default deployment posture:
+# - Alertmanager runs on VM2 for grouping, silences, and alert inspection.
+# - Outbound notification integrations are site-specific and must be added at render time.
+# - The base template intentionally keeps alerts local-only until a site-specific receiver is configured.
+route:
+  receiver: signhex-local-only
+  group_by:
+    - alertname
+    - severity
+    - role
+    - site
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: signhex-local-only
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal:
+      - alertname
+      - instance

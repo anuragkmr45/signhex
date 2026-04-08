@@ -1,0 +1,12 @@
+[
+  {
+    "targets": ["10.30.0.101:3300"],
+    "labels": {
+      "site": "qa-example",
+      "environment": "qa",
+      "player_group": "lobby",
+      "screen_id": "replace-with-screen-id",
+      "device_id": "replace-with-device-id"
+    }
+  }
+]

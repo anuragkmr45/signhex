@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    site: dev-local
+    environment: development
+
+rule_files:
+  - /etc/signhex/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - 127.0.0.1:9090
+        labels:
+          role: observability
+          machine: local
+
+  - job_name: players
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - /etc/signhex/prometheus/file-sd/players.targets.json
+        refresh_interval: 1m
