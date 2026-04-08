@@ -2,6 +2,8 @@ services:
   prometheus:
     image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.3.1}
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -20,6 +22,8 @@ services:
     restart: unless-stopped
     depends_on:
       - prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       GF_SERVER_ROOT_URL: ${DEV_GRAFANA_ROOT_URL:-http://localhost:3001/grafana/}
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"

@@ -17,6 +17,18 @@ scrape_configs:
           role: observability
           machine: local
 
+  - job_name: signhex-server
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: signhex-development-prometheus
+    static_configs:
+      - targets:
+          - host.docker.internal:3002
+        labels:
+          role: backend
+          machine: dev-local
+
   - job_name: players
     metrics_path: /metrics
     file_sd_configs:
