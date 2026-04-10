@@ -78,6 +78,7 @@ The per-platform export folders under `out/<release>/electron/<platform>/` are f
 - `QA_DATA_HOST`, `QA_BACKEND_HOST`, `QA_CMS_HOST` for `qa` and `all`
 - optional `QA_BACKEND_DEVICE_HOST` if players should not use `QA_BACKEND_HOST`
 - `CMS_PUBLIC_HOST`, `BACKEND_PRIVATE_HOST`, `BACKEND_DEVICE_HOST`, `DATA_PRIVATE_HOST` for `production` and `all`
+- optional `OBSERVABILITY_PRIVATE_HOST` for the custom 4-VM production layout
 
 ## Profiles
 
@@ -117,6 +118,7 @@ CMS_PUBLIC_HOST=10.20.0.30 \
 BACKEND_PRIVATE_HOST=10.20.0.20 \
 BACKEND_DEVICE_HOST=10.20.0.21 \
 DATA_PRIVATE_HOST=10.20.0.10 \
+OBSERVABILITY_PRIVATE_HOST=10.20.0.40 \
 SERVER_PACKAGE_DIR=out/2026-04-02-r1/server \
 CMS_PACKAGE_DIR=out/2026-04-02-r1/cms \
 PLAYER_ARTIFACTS_DIR=/artifacts/signage-screen/1.2.3 \
@@ -142,6 +144,7 @@ CMS_PUBLIC_HOST=10.20.0.30 \
 BACKEND_PRIVATE_HOST=10.20.0.20 \
 BACKEND_DEVICE_HOST=10.20.0.21 \
 DATA_PRIVATE_HOST=10.20.0.10 \
+OBSERVABILITY_PRIVATE_HOST=10.20.0.40 \
 BACKEND_IMAGE_REF=ghcr.io/hexmon/signhex-server:1.2.3 \
 BACKEND_IMAGE_ARCHIVE=/artifacts/signhex-server-1.2.3.tar \
 CMS_BUNDLE_SOURCE=/artifacts/signhex-nexus-core-1.2.3.tgz \
@@ -163,6 +166,7 @@ dist/onprem/<site-name>/
     data/
     backend/
     cms/
+    observability/   # only when OBSERVABILITY_PRIVATE_HOST is set
     electron/
     PRODUCTION_SETUP_GUIDE.md
   SHA256SUMS.txt

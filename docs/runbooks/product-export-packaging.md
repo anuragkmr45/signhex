@@ -107,6 +107,8 @@ bash scripts/bundle/assemble-runtime-bundle.sh --profile qa site-a-qa
 
 For production, use the same exported `server/` package as input to the production bundle builder. The package still contains backend, PostgreSQL, and MinIO image archives together; the split into `production/data/` and `production/backend/` happens during runtime bundle assembly.
 
+If you set `OBSERVABILITY_PRIVATE_HOST` while assembling the production bundle, the bundle builder also creates a source-free `production/observability/` folder for a dedicated fourth observability VM. That dedicated observability folder is assembled from the platform-owned observability assets, not from a separate product export package.
+
 Production-oriented export example:
 
 ```bash

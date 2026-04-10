@@ -18,16 +18,16 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets:
-          - "127.0.0.1:9090"
+          - "__PROMETHEUS_SELF_TARGET__"
         labels:
           role: observability
-          machine: vm2
+          machine: __PROMETHEUS_MACHINE_LABEL__
 
   - job_name: signhex-server
     metrics_path: /metrics
     static_configs:
       - targets:
-          - "127.0.0.1:3000"
+          - "__BACKEND_METRICS_TARGET__"
         labels:
           role: backend
           machine: vm2
@@ -100,10 +100,10 @@ scrape_configs:
   - job_name: vm3-grafana
     static_configs:
       - targets:
-          - "__VM3_CMS_HOST__:3001"
+          - "__GRAFANA_METRICS_TARGET__"
         labels:
-          role: cms
-          machine: vm3
+          role: __GRAFANA_ROLE_LABEL__
+          machine: __GRAFANA_MACHINE_LABEL__
 
   - job_name: players
     metrics_path: /metrics

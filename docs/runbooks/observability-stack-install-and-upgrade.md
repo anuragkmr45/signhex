@@ -9,6 +9,13 @@ This runbook covers the platform-owned observability stack:
 - Grafana on VM3 behind `/grafana/`
 - exporter placement on VM1 / VM2 / VM3
 
+Custom 4-VM variation:
+
+- Prometheus on VM4
+- optional Alertmanager on VM4
+- Grafana on VM4 behind the CMS reverse proxy on `/grafana/`
+- exporter placement on VM1 / VM2 / VM3
+
 ## Install
 
 1. Start from the environment example in `deploy/production/observability/` or `deploy/qa/observability/`.
@@ -43,4 +50,5 @@ This runbook covers the platform-owned observability stack:
 ## Environment Notes
 
 - Production and QA share the same VM1 / VM2 / VM3 structure.
+- If `OBSERVABILITY_PRIVATE_HOST` is used, production can instead run the observability stack on a dedicated VM4.
 - Development uses `deploy/development/observability/` only for local validation of the observability assets themselves.

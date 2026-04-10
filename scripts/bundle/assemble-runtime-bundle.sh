@@ -30,6 +30,7 @@ Required environment inputs:
   BACKEND_PRIVATE_HOST=10.20.0.20             # required for profile all|production
   BACKEND_DEVICE_HOST=10.20.0.21              # required for profile all|production, defaults to BACKEND_PRIVATE_HOST
   DATA_PRIVATE_HOST=10.20.0.10                # required for profile all|production
+  OBSERVABILITY_PRIVATE_HOST=10.20.0.40       # optional custom production 4-VM layout only
 
 Optional operational inputs:
   SERVER_PACKAGE_DIR=/path/to/out/<release>/server
@@ -43,6 +44,9 @@ Optional operational inputs:
   POSTGRES_IMAGE=postgres:15-alpine
   MINIO_IMAGE=minio/minio:latest
   NGINX_IMAGE=nginx:1.27-alpine
+  PROMETHEUS_IMAGE=prom/prometheus:v3.3.1
+  ALERTMANAGER_IMAGE=prom/alertmanager:v0.28.1
+  GRAFANA_IMAGE=grafana/grafana:12.0.2
 
 Example:
   QA_DATA_HOST=10.30.0.10 \
@@ -53,6 +57,7 @@ Example:
   BACKEND_PRIVATE_HOST=10.20.0.20 \
   BACKEND_DEVICE_HOST=10.20.0.21 \
   DATA_PRIVATE_HOST=10.20.0.10 \
+  OBSERVABILITY_PRIVATE_HOST=10.20.0.40 \
   BACKEND_IMAGE_REF=ghcr.io/hexmon/signhex-server:1.2.3 \
   BACKEND_IMAGE_ARCHIVE=/artifacts/signhex-server-1.2.3.tar \
   CMS_BUNDLE_SOURCE=/artifacts/signhex-nexus-core-1.2.3.tgz \
@@ -398,6 +403,111 @@ stage_observability_assets() {
   write_observability_images_readme "$cms_dir/observability/images/README.md"
 }
 
+render_prometheus_config() {
+  local destination="$1"
+  local site_name="$2"
+  local environment_name="$3"
+  local vm1_data_host="$4"
+  local vm2_backend_host="$5"
+  local vm3_cms_host="$6"
+  local alertmanager_host="$7"
+  local alertmanager_port="$8"
+  local scrape_interval="$9"
+  local evaluation_interval="${10}"
+  local prometheus_self_target="${11}"
+  local prometheus_machine_label="${12}"
+  local backend_metrics_target="${13}"
+  local grafana_metrics_target="${14}"
+  local grafana_role_label="${15}"
+  local grafana_machine_label="${16}"
+
+  sed \
+    -e "s/__SITE_NAME__/${site_name}/g" \
+    -e "s/__ENVIRONMENT__/${environment_name}/g" \
+    -e "s/__VM1_DATA_HOST__/${vm1_data_host}/g" \
+    -e "s/__VM2_BACKEND_HOST__/${vm2_backend_host}/g" \
+    -e "s/__VM3_CMS_HOST__/${vm3_cms_host}/g" \
+    -e "s/__ALERTMANAGER_HOST__/${alertmanager_host}/g" \
+    -e "s/__ALERTMANAGER_PORT__/${alertmanager_port}/g" \
+    -e "s/__PROMETHEUS_SCRAPE_INTERVAL__/${scrape_interval}/g" \
+    -e "s/__PROMETHEUS_EVALUATION_INTERVAL__/${evaluation_interval}/g" \
+    -e "s/__PROMETHEUS_SELF_TARGET__/${prometheus_self_target}/g" \
+    -e "s/__PROMETHEUS_MACHINE_LABEL__/${prometheus_machine_label}/g" \
+    -e "s/__BACKEND_METRICS_TARGET__/${backend_metrics_target}/g" \
+    -e "s/__GRAFANA_METRICS_TARGET__/${grafana_metrics_target}/g" \
+    -e "s/__GRAFANA_ROLE_LABEL__/${grafana_role_label}/g" \
+    -e "s/__GRAFANA_MACHINE_LABEL__/${grafana_machine_label}/g" \
+    "$PLATFORM_ROOT/deploy/shared/observability/prometheus/prometheus.yml.template" > "$destination"
+}
+
+render_grafana_ini() {
+  local destination="$1"
+  local cms_public_host="$2"
+  local grafana_root_url="$3"
+  local grafana_cookie_secure="$4"
+
+  sed \
+    -e "s/__CMS_PUBLIC_HOST__/${cms_public_host}/g" \
+    -e "s#__GRAFANA_ROOT_URL__#${grafana_root_url}#g" \
+    -e "s/__GRAFANA_COOKIE_SECURE__/${grafana_cookie_secure}/g" \
+    "$PLATFORM_ROOT/deploy/shared/observability/grafana/grafana.ini.template" > "$destination"
+}
+
+write_observability_compose() {
+  local destination="$1"
+  cat > "$destination" <<'EOF'
+services:
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    command:
+      - --config.file=/etc/signhex/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}
+      - --storage.tsdb.wal-compression
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/signhex/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/signhex/prometheus/rules:ro
+      - ./prometheus/file-sd:/etc/signhex/prometheus/file-sd:ro
+      - prometheus_data:/prometheus
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${ALERTMANAGER_HOST_PORT:-9093}:9093"
+    command:
+      - --config.file=/etc/signhex/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/signhex/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/templates:/etc/signhex/alertmanager/templates:ro
+      - alertmanager_data:/alertmanager
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_HOST_PORT:-3001}:3000"
+    environment:
+      GF_PATHS_CONFIG: /etc/grafana/grafana.ini
+      PROMETHEUS_UPSTREAM_URL: ${PROMETHEUS_UPSTREAM_URL}
+    volumes:
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
+EOF
+}
+
 TEMP_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signhex-platform.XXXXXX")"
 cleanup_temp_work_dir() {
   rm -rf "$TEMP_WORK_DIR"
@@ -435,6 +545,7 @@ CMS_PUBLIC_HOST="${CMS_PUBLIC_HOST:-}"
 BACKEND_PRIVATE_HOST="${BACKEND_PRIVATE_HOST:-}"
 BACKEND_DEVICE_HOST="${BACKEND_DEVICE_HOST:-$BACKEND_PRIVATE_HOST}"
 DATA_PRIVATE_HOST="${DATA_PRIVATE_HOST:-}"
+OBSERVABILITY_PRIVATE_HOST="${OBSERVABILITY_PRIVATE_HOST:-}"
 
 BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-${SERVER_PACKAGE_BACKEND_IMAGE_REF:-}}"
 BACKEND_IMAGE_ARCHIVE="${BACKEND_IMAGE_ARCHIVE:-}"
@@ -463,6 +574,12 @@ API_HOST_PORT="${API_HOST_PORT:-3000}"
 POSTGRES_HOST_PORT="${POSTGRES_HOST_PORT:-5432}"
 MINIO_HOST_PORT="${MINIO_HOST_PORT:-9000}"
 MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+PROMETHEUS_HOST_PORT="${PROMETHEUS_HOST_PORT:-9090}"
+ALERTMANAGER_HOST_PORT="${ALERTMANAGER_HOST_PORT:-9093}"
+GRAFANA_HOST_PORT="${GRAFANA_HOST_PORT:-3001}"
+PROMETHEUS_SCRAPE_INTERVAL="${PROMETHEUS_SCRAPE_INTERVAL:-30s}"
+PROMETHEUS_EVALUATION_INTERVAL="${PROMETHEUS_EVALUATION_INTERVAL:-30s}"
+PROMETHEUS_RETENTION_TIME="${PROMETHEUS_RETENTION_TIME:-30d}"
 
 CMS_TLS_CERT_FILE="${CMS_TLS_CERT_FILE:-}"
 CMS_TLS_KEY_FILE="${CMS_TLS_KEY_FILE:-}"
@@ -472,6 +589,9 @@ ONPREM_BACKEND_CA_FILE="${ONPREM_BACKEND_CA_FILE:-}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-${SERVER_PACKAGE_POSTGRES_IMAGE_REF:-postgres:15-alpine}}"
 MINIO_IMAGE="${MINIO_IMAGE:-${SERVER_PACKAGE_MINIO_IMAGE_REF:-minio/minio:latest}}"
 NGINX_IMAGE="${NGINX_IMAGE:-${CMS_PACKAGE_NGINX_IMAGE_REF:-nginx:1.27-alpine}}"
+PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE:-prom/prometheus:v3.3.1}"
+ALERTMANAGER_IMAGE="${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.28.1}"
+GRAFANA_IMAGE="${GRAFANA_IMAGE:-grafana/grafana:12.0.2}"
 
 POSTGRES_PACKAGE_ARCHIVE=""
 MINIO_PACKAGE_ARCHIVE=""
@@ -535,6 +655,9 @@ if profile_enabled production; then
   require_ipv4 "BACKEND_PRIVATE_HOST" "$BACKEND_PRIVATE_HOST"
   require_ipv4 "BACKEND_DEVICE_HOST" "$BACKEND_DEVICE_HOST"
   require_ipv4 "DATA_PRIVATE_HOST" "$DATA_PRIVATE_HOST"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    require_ipv4 "OBSERVABILITY_PRIVATE_HOST" "$OBSERVABILITY_PRIVATE_HOST"
+  fi
 fi
 
 if [[ "$ONPREM_CERT_MODE" != "generate" && "$ONPREM_CERT_MODE" != "provided" ]]; then
@@ -601,6 +724,7 @@ QA_ELECTRON_DIR="$QA_ROOT/electron"
 PROD_DATA_DIR="$PRODUCTION_ROOT/data"
 PROD_BACKEND_DIR="$PRODUCTION_ROOT/backend"
 PROD_CMS_DIR="$PRODUCTION_ROOT/cms"
+PROD_OBSERVABILITY_DIR="$PRODUCTION_ROOT/observability"
 PROD_ELECTRON_DIR="$PRODUCTION_ROOT/electron"
 
 rm -rf "$BUNDLE_ROOT"
@@ -628,20 +752,36 @@ if profile_enabled production; then
     "$PROD_CMS_DIR/www" \
     "$PROD_CMS_DIR/admin-browser" \
     "$PROD_ELECTRON_DIR"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    mkdir -p \
+      "$PROD_OBSERVABILITY_DIR/images" \
+      "$PROD_OBSERVABILITY_DIR/prometheus" \
+      "$PROD_OBSERVABILITY_DIR/alertmanager" \
+      "$PROD_OBSERVABILITY_DIR/grafana"
+  fi
 fi
 
 BACKEND_IMAGE_ARCHIVE_NAME="$(basename "$BACKEND_IMAGE_ARCHIVE")"
 POSTGRES_IMAGE_ARCHIVE_NAME="$(basename "${POSTGRES_PACKAGE_ARCHIVE:-${POSTGRES_IMAGE//[:\/]/-}.tar}")"
 MINIO_IMAGE_ARCHIVE_NAME="$(basename "${MINIO_PACKAGE_ARCHIVE:-${MINIO_IMAGE//[:\/]/-}.tar}")"
 NGINX_IMAGE_ARCHIVE_NAME="$(basename "${NGINX_PACKAGE_ARCHIVE:-${NGINX_IMAGE//[:\/]/-}.tar}")"
+PROMETHEUS_IMAGE_ARCHIVE_NAME="$(basename "${PROMETHEUS_IMAGE//[:\/]/-}.tar")"
+ALERTMANAGER_IMAGE_ARCHIVE_NAME="$(basename "${ALERTMANAGER_IMAGE//[:\/]/-}.tar")"
+GRAFANA_IMAGE_ARCHIVE_NAME="$(basename "${GRAFANA_IMAGE//[:\/]/-}.tar")"
 
 POSTGRES_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$POSTGRES_IMAGE_ARCHIVE_NAME"
 MINIO_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$MINIO_IMAGE_ARCHIVE_NAME"
 NGINX_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$NGINX_IMAGE_ARCHIVE_NAME"
+PROMETHEUS_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$PROMETHEUS_IMAGE_ARCHIVE_NAME"
+ALERTMANAGER_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$ALERTMANAGER_IMAGE_ARCHIVE_NAME"
+GRAFANA_IMAGE_ARCHIVE_TEMP="$TEMP_WORK_DIR/$GRAFANA_IMAGE_ARCHIVE_NAME"
 
 DOCKER_REQUIRED="false"
 if [[ "$SKIP_DOCKER" != "true" ]]; then
   if [[ -z "$POSTGRES_PACKAGE_ARCHIVE" || -z "$MINIO_PACKAGE_ARCHIVE" || -z "$NGINX_PACKAGE_ARCHIVE" ]]; then
+    DOCKER_REQUIRED="true"
+  fi
+  if profile_enabled production && [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
     DOCKER_REQUIRED="true"
   fi
 fi
@@ -733,6 +873,29 @@ else
   fi
   if profile_enabled production; then
     copy_archive_to_targets "$NGINX_IMAGE_ARCHIVE_TEMP" "$PROD_CMS_DIR/images"
+  fi
+fi
+
+if profile_enabled production && [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+  if [[ "$SKIP_DOCKER" == "true" ]]; then
+    write_skip_placeholder "$PROD_OBSERVABILITY_DIR/images" "$PROMETHEUS_IMAGE_ARCHIVE_NAME" "$PROMETHEUS_IMAGE"
+    write_skip_placeholder "$PROD_OBSERVABILITY_DIR/images" "$ALERTMANAGER_IMAGE_ARCHIVE_NAME" "$ALERTMANAGER_IMAGE"
+    write_skip_placeholder "$PROD_OBSERVABILITY_DIR/images" "$GRAFANA_IMAGE_ARCHIVE_NAME" "$GRAFANA_IMAGE"
+  else
+    echo "Preparing observability image: $PROMETHEUS_IMAGE"
+    docker image inspect "$PROMETHEUS_IMAGE" >/dev/null 2>&1 || docker pull "$PROMETHEUS_IMAGE"
+    docker save -o "$PROMETHEUS_IMAGE_ARCHIVE_TEMP" "$PROMETHEUS_IMAGE"
+    copy_archive_to_targets "$PROMETHEUS_IMAGE_ARCHIVE_TEMP" "$PROD_OBSERVABILITY_DIR/images"
+
+    echo "Preparing observability image: $ALERTMANAGER_IMAGE"
+    docker image inspect "$ALERTMANAGER_IMAGE" >/dev/null 2>&1 || docker pull "$ALERTMANAGER_IMAGE"
+    docker save -o "$ALERTMANAGER_IMAGE_ARCHIVE_TEMP" "$ALERTMANAGER_IMAGE"
+    copy_archive_to_targets "$ALERTMANAGER_IMAGE_ARCHIVE_TEMP" "$PROD_OBSERVABILITY_DIR/images"
+
+    echo "Preparing observability image: $GRAFANA_IMAGE"
+    docker image inspect "$GRAFANA_IMAGE" >/dev/null 2>&1 || docker pull "$GRAFANA_IMAGE"
+    docker save -o "$GRAFANA_IMAGE_ARCHIVE_TEMP" "$GRAFANA_IMAGE"
+    copy_archive_to_targets "$GRAFANA_IMAGE_ARCHIVE_TEMP" "$PROD_OBSERVABILITY_DIR/images"
   fi
 fi
 
@@ -842,6 +1005,14 @@ fi
 
 if profile_enabled production; then
   stage_observability_assets "production" "$PROD_DATA_DIR" "$PROD_BACKEND_DIR" "$PROD_CMS_DIR"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/prometheus" "$PROD_OBSERVABILITY_DIR/prometheus"
+    copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/alertmanager" "$PROD_OBSERVABILITY_DIR/alertmanager"
+    copy_tree_contents "$PLATFORM_ROOT/deploy/shared/observability/grafana" "$PROD_OBSERVABILITY_DIR/grafana"
+    cp "$PLATFORM_ROOT/deploy/production/observability/README.md" "$PROD_OBSERVABILITY_DIR/README.md"
+    cp "$PLATFORM_ROOT/deploy/production/observability/bundle.env.example" "$PROD_OBSERVABILITY_DIR/.env.observability.example"
+    write_observability_images_readme "$PROD_OBSERVABILITY_DIR/images/README.md"
+  fi
 fi
 
 if profile_enabled qa; then
@@ -1108,6 +1279,24 @@ EOF
 fi
 
 if profile_enabled production; then
+  PROD_GRAFANA_UPSTREAM_HOST="127.0.0.1"
+  PROD_GRAFANA_UPSTREAM_PORT="$GRAFANA_HOST_PORT"
+  PROD_PROMETHEUS_SELF_TARGET="127.0.0.1:9090"
+  PROD_PROMETHEUS_MACHINE_LABEL="vm2"
+  PROD_BACKEND_METRICS_TARGET="127.0.0.1:${API_HOST_PORT}"
+  PROD_GRAFANA_METRICS_TARGET="${CMS_PUBLIC_HOST}:${GRAFANA_HOST_PORT}"
+  PROD_GRAFANA_ROLE_LABEL="cms"
+  PROD_GRAFANA_MACHINE_LABEL="vm3"
+
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    PROD_GRAFANA_UPSTREAM_HOST="$OBSERVABILITY_PRIVATE_HOST"
+    PROD_PROMETHEUS_MACHINE_LABEL="vm4"
+    PROD_BACKEND_METRICS_TARGET="${BACKEND_PRIVATE_HOST}:${API_HOST_PORT}"
+    PROD_GRAFANA_METRICS_TARGET="grafana:3000"
+    PROD_GRAFANA_ROLE_LABEL="observability"
+    PROD_GRAFANA_MACHINE_LABEL="vm4"
+  fi
+
   cat > "$PROD_DATA_DIR/.env.production" <<EOF
 POSTGRES_IMAGE=$POSTGRES_IMAGE
 MINIO_IMAGE=$MINIO_IMAGE
@@ -1170,9 +1359,63 @@ CMS_PUBLIC_ORIGIN=$CMS_PRODUCTION_ORIGIN
 CMS_HTTP_PORT=$CMS_HTTP_PORT
 CMS_HTTPS_PORT=$CMS_HTTPS_PORT
 BACKEND_PRIVATE_HOST=$BACKEND_PRIVATE_HOST
-GRAFANA_UPSTREAM_HOST=127.0.0.1
-GRAFANA_UPSTREAM_PORT=3001
+GRAFANA_UPSTREAM_HOST=$PROD_GRAFANA_UPSTREAM_HOST
+GRAFANA_UPSTREAM_PORT=$PROD_GRAFANA_UPSTREAM_PORT
 EOF
+
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    cat > "$PROD_OBSERVABILITY_DIR/.env.production" <<EOF
+SITE_NAME=$SITE_NAME
+ENVIRONMENT=production
+VM1_DATA_HOST=$DATA_PRIVATE_HOST
+VM2_BACKEND_HOST=$BACKEND_PRIVATE_HOST
+VM3_CMS_HOST=$CMS_PUBLIC_HOST
+VM4_OBSERVABILITY_HOST=$OBSERVABILITY_PRIVATE_HOST
+BACKEND_DEVICE_HOST=$BACKEND_DEVICE_HOST
+PROMETHEUS_IMAGE=$PROMETHEUS_IMAGE
+PROMETHEUS_HOST_PORT=$PROMETHEUS_HOST_PORT
+PROMETHEUS_SCRAPE_INTERVAL=$PROMETHEUS_SCRAPE_INTERVAL
+PROMETHEUS_EVALUATION_INTERVAL=$PROMETHEUS_EVALUATION_INTERVAL
+PROMETHEUS_RETENTION_TIME=$PROMETHEUS_RETENTION_TIME
+ALERTMANAGER_IMAGE=$ALERTMANAGER_IMAGE
+ALERTMANAGER_HOST=alertmanager
+ALERTMANAGER_PORT=9093
+ALERTMANAGER_HOST_PORT=$ALERTMANAGER_HOST_PORT
+GRAFANA_IMAGE=$GRAFANA_IMAGE
+GRAFANA_HOST_PORT=$GRAFANA_HOST_PORT
+PROMETHEUS_UPSTREAM_URL=http://prometheus:9090
+GRAFANA_ROOT_URL=$CMS_PRODUCTION_ORIGIN/grafana/
+EOF
+
+    render_prometheus_config \
+      "$PROD_OBSERVABILITY_DIR/prometheus/prometheus.yml" \
+      "$SITE_NAME" \
+      "production" \
+      "$DATA_PRIVATE_HOST" \
+      "$BACKEND_PRIVATE_HOST" \
+      "$CMS_PUBLIC_HOST" \
+      "alertmanager" \
+      "9093" \
+      "$PROMETHEUS_SCRAPE_INTERVAL" \
+      "$PROMETHEUS_EVALUATION_INTERVAL" \
+      "$PROD_PROMETHEUS_SELF_TARGET" \
+      "$PROD_PROMETHEUS_MACHINE_LABEL" \
+      "$PROD_BACKEND_METRICS_TARGET" \
+      "$PROD_GRAFANA_METRICS_TARGET" \
+      "$PROD_GRAFANA_ROLE_LABEL" \
+      "$PROD_GRAFANA_MACHINE_LABEL"
+
+    cp "$PLATFORM_ROOT/deploy/shared/observability/alertmanager/alertmanager.yml.template" \
+      "$PROD_OBSERVABILITY_DIR/alertmanager/alertmanager.yml"
+
+    render_grafana_ini \
+      "$PROD_OBSERVABILITY_DIR/grafana/grafana.ini" \
+      "$CMS_PUBLIC_HOST" \
+      "$CMS_PRODUCTION_ORIGIN/grafana/" \
+      "true"
+
+    write_observability_compose "$PROD_OBSERVABILITY_DIR/docker-compose.yml"
+  fi
 
   cat > "$PROD_DATA_DIR/docker-compose.yml" <<'EOF'
 services:
@@ -1301,7 +1544,7 @@ server {
   }
 
   location /grafana/ {
-    proxy_pass http://127.0.0.1:3001/;
+    proxy_pass http://$PROD_GRAFANA_UPSTREAM_HOST:$PROD_GRAFANA_UPSTREAM_PORT/;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header Upgrade \$http_upgrade;
@@ -1323,12 +1566,21 @@ EOF
   write_load_images_script "$PROD_DATA_DIR/load-images.sh"
   write_load_images_script "$PROD_BACKEND_DIR/load-images.sh"
   write_load_images_script "$PROD_CMS_DIR/load-images.sh"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    write_load_images_script "$PROD_OBSERVABILITY_DIR/load-images.sh"
+  fi
   write_start_script "$PROD_DATA_DIR/start.sh" ".env.production"
   write_start_script "$PROD_BACKEND_DIR/start.sh" ".env.production"
   write_start_script "$PROD_CMS_DIR/start.sh" ".env.production"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    write_start_script "$PROD_OBSERVABILITY_DIR/start.sh" ".env.production"
+  fi
   write_stop_script "$PROD_DATA_DIR/stop.sh" ".env.production"
   write_stop_script "$PROD_BACKEND_DIR/stop.sh" ".env.production"
   write_stop_script "$PROD_CMS_DIR/stop.sh" ".env.production"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    write_stop_script "$PROD_OBSERVABILITY_DIR/stop.sh" ".env.production"
+  fi
 
   cat > "$PROD_DATA_DIR/health-check.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1358,6 +1610,18 @@ curl -kfsS "https://127.0.0.1:${CMS_HTTPS_PORT}/api/v1/health" >/dev/null
 echo "Production CMS healthy."
 EOF
 
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    cat > "$PROD_OBSERVABILITY_DIR/health-check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source ./.env.production
+curl -fsS "http://127.0.0.1:${PROMETHEUS_HOST_PORT}/-/ready" >/dev/null
+curl -fsS "http://127.0.0.1:${ALERTMANAGER_HOST_PORT}/-/ready" >/dev/null
+curl -fsS "http://127.0.0.1:${GRAFANA_HOST_PORT}/api/health" >/dev/null
+echo "Production observability stack healthy."
+EOF
+  fi
+
   cat > "$PROD_DATA_DIR/README.md" <<EOF
 # Production Data Bundle
 
@@ -1382,7 +1646,7 @@ EOF
   cat > "$PROD_BACKEND_DIR/README.md" <<EOF
 # Production Backend Bundle
 
-This folder runs the Signhex backend bundle with separate `api` and `worker` containers from the same image.
+This folder runs the Signhex backend bundle with separate \`api\` and \`worker\` containers from the same image.
 
 ## Start
 
@@ -1417,8 +1681,33 @@ This folder runs the prebuilt CMS through Nginx with HTTPS termination.
 
 - CMS: $CMS_PRODUCTION_ORIGIN
 - API/socket proxy target: http://$BACKEND_PRIVATE_HOST:3000
+- Grafana upstream target: http://$PROD_GRAFANA_UPSTREAM_HOST:$PROD_GRAFANA_UPSTREAM_PORT
 - Grafana path: $CMS_PRODUCTION_ORIGIN/grafana/
 EOF
+
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    cat > "$PROD_OBSERVABILITY_DIR/README.md" <<EOF
+# Production Observability Bundle
+
+This folder runs Prometheus, Alertmanager, and Grafana on the dedicated observability VM.
+
+## Start
+
+\`\`\`bash
+./load-images.sh
+./start.sh
+./health-check.sh
+\`\`\`
+
+## Reachability
+
+- Prometheus: http://$OBSERVABILITY_PRIVATE_HOST:$PROMETHEUS_HOST_PORT
+- Alertmanager: http://$OBSERVABILITY_PRIVATE_HOST:$ALERTMANAGER_HOST_PORT
+- Grafana internal host: http://$OBSERVABILITY_PRIVATE_HOST:$GRAFANA_HOST_PORT
+- Grafana operator path: $CMS_PRODUCTION_ORIGIN/grafana/
+- Backend scrape target: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT/metrics
+EOF
+  fi
 
   stage_player_bundle "$PROD_ELECTRON_DIR" "production" "$BACKEND_DEVICE_HOST" "PRODUCTION_SETUP_GUIDE.md"
   cp "$RUNBOOKS_DIR/onprem-production-setup.md" "$PRODUCTION_ROOT/PRODUCTION_SETUP_GUIDE.md"
@@ -1477,12 +1766,24 @@ if profile_enabled production; then
   - CMS: $CMS_PRODUCTION_ORIGIN
   - backend: http://$BACKEND_PRIVATE_HOST:$API_HOST_PORT
   - player endpoint: http://$BACKEND_DEVICE_HOST:3000
+EOF
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+  - observability: http://$OBSERVABILITY_PRIVATE_HOST:$PROMETHEUS_HOST_PORT
+EOF
+  fi
+  cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
   - folders:
     - \`production/data/\`
     - \`production/backend/\`
     - \`production/cms/\`
     - \`production/electron/\`
 EOF
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<EOF
+    - \`production/observability/\`
+EOF
+  fi
 fi
 
 cat >> "$BUNDLE_ROOT/BUNDLE_OVERVIEW.md" <<'EOF'
@@ -1515,12 +1816,14 @@ cat > "$BUNDLE_ROOT/PROXMOX_SIZING.md" <<'EOF'
   - Data VM
   - Backend VM
   - CMS guest as a small VM by default or an unprivileged LXC when Docker support is already prepared
+  - optional dedicated Observability VM for custom 4-VM layouts
 
 ## Production baseline
 
 - Data VM: 6 vCPU / 16 GB RAM / 500 GB NVMe-backed storage minimum
 - Backend VM: 6 vCPU / 12 GB RAM / 120 GB SSD
 - CMS guest: 2 vCPU / 4 GB RAM / 40 GB SSD
+- Observability VM: 4 vCPU / 8 GB RAM / 120 GB SSD when used
 
 ## Rules
 
@@ -1584,6 +1887,13 @@ if profile_enabled production; then
     "$PROD_CMS_DIR/start.sh" \
     "$PROD_CMS_DIR/stop.sh" \
     "$PROD_CMS_DIR/health-check.sh"
+  if [[ -n "$OBSERVABILITY_PRIVATE_HOST" ]]; then
+    chmod +x \
+      "$PROD_OBSERVABILITY_DIR/load-images.sh" \
+      "$PROD_OBSERVABILITY_DIR/start.sh" \
+      "$PROD_OBSERVABILITY_DIR/stop.sh" \
+      "$PROD_OBSERVABILITY_DIR/health-check.sh"
+  fi
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then

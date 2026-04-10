@@ -26,12 +26,17 @@ This guide assumes:
   - `production/backend/`
   - `production/cms/`
   - `production/electron/`
+  - optional `production/observability/` when `OBSERVABILITY_PRIVATE_HOST` is set
 
 Observability assets are staged alongside the runtime folders:
 
 - `production/data/observability/`
 - `production/backend/observability/`
 - `production/cms/observability/`
+
+When `OBSERVABILITY_PRIVATE_HOST` is set, the bundle also includes:
+
+- `production/observability/`
 
 ## 1. Before You Start
 
@@ -40,6 +45,7 @@ Observability assets are staged alongside the runtime folders:
 - `Data VM`
 - `Backend VM`
 - `CMS guest`
+- optional `Observability VM` for the custom 4-VM layout
 - separate player machines
 
 Recommended topology:
@@ -47,6 +53,7 @@ Recommended topology:
 - `Data VM`: Ubuntu Server VM
 - `Backend VM`: Ubuntu Server VM running separate `api` and `worker` containers from `production/backend/`
 - `CMS guest`: small Ubuntu VM by default, or an unprivileged LXC only when Docker/Compose support is already prepared
+- optional `Observability VM`: Ubuntu Server VM for Prometheus, Alertmanager, and Grafana
 
 ### Supported deployment layouts
 
@@ -58,6 +65,13 @@ Primary supported production layout:
 - separate player machines on the same private network
 
 This is the default topology assumed by this runbook and by the generated production bundle.
+
+Custom 4-VM variation:
+
+- machine A: PostgreSQL + MinIO from `production/data/`
+- machine B: backend bundle from `production/backend/`
+- machine C: CMS from `production/cms/`
+- machine D: observability bundle from `production/observability/`
 
 Supported network model:
 
@@ -86,6 +100,11 @@ Confirm these paths before deployment:
 - VM2 Prometheus must reach VM1, VM2, and VM3 exporter ports
 - VM3 nginx must reach local Grafana on the configured upstream port
 
+When `OBSERVABILITY_PRIVATE_HOST` is set:
+
+- VM4 Prometheus must reach VM1, VM2, and VM3 exporter and metrics ports
+- VM3 nginx must reach VM4 Grafana on `3001/tcp`
+
 Optional:
 
 - operators may need access to MinIO console on `9001/tcp`
@@ -101,6 +120,7 @@ Collect these before you build the bundle:
 - `BACKEND_PRIVATE_HOST`
 - `BACKEND_DEVICE_HOST`
 - `DATA_PRIVATE_HOST`
+- optional `OBSERVABILITY_PRIVATE_HOST` for the custom 4-VM bundle
 - preferred:
   - `SERVER_PACKAGE_DIR`
   - `CMS_PACKAGE_DIR`
@@ -181,6 +201,7 @@ export CMS_PUBLIC_HOST="10.20.0.30"
 export BACKEND_PRIVATE_HOST="10.20.0.20"
 export BACKEND_DEVICE_HOST="10.20.0.21"
 export DATA_PRIVATE_HOST="10.20.0.10"
+export OBSERVABILITY_PRIVATE_HOST="10.20.0.40"
 export SERVER_PACKAGE_DIR="out/${RELEASE_ID}/server"
 export CMS_PACKAGE_DIR="out/${RELEASE_ID}/cms"
 export PLAYER_ARTIFACTS_DIR="/artifacts/signage-screen/1.2.3"
@@ -240,6 +261,7 @@ Expected result:
   - `production/backend/`
   - `production/cms/`
   - `production/electron/`
+  - optional `production/observability/` when `OBSERVABILITY_PRIVATE_HOST` is set
 
 Failure hint:
 
@@ -255,6 +277,7 @@ export DEPLOY_USER="support"
 export DATA_VM_HOST="10.20.0.10"
 export BACKEND_VM_HOST="10.20.0.20"
 export CMS_VM_HOST="10.20.0.30"
+export OBSERVABILITY_VM_HOST="10.20.0.40"
 ```
 
 Copy the production folders:
@@ -263,6 +286,12 @@ Copy the production folders:
 scp -r "dist/onprem/${SITE_NAME}/production/data" "${DEPLOY_USER}@${DATA_VM_HOST}:/opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/"
 scp -r "dist/onprem/${SITE_NAME}/production/backend" "${DEPLOY_USER}@${BACKEND_VM_HOST}:/opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/"
 scp -r "dist/onprem/${SITE_NAME}/production/cms" "${DEPLOY_USER}@${CMS_VM_HOST}:/opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/"
+```
+
+If you built the custom 4-VM bundle:
+
+```bash
+scp -r "dist/onprem/${SITE_NAME}/production/observability" "${DEPLOY_USER}@${OBSERVABILITY_VM_HOST}:/opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/"
 ```
 
 Purpose:
@@ -283,6 +312,12 @@ Create the active symlinks:
 ssh "${DEPLOY_USER}@${DATA_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID} /opt/signhex/${SITE_NAME} && ln -sfn /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/data /opt/signhex/${SITE_NAME}/current"
 ssh "${DEPLOY_USER}@${BACKEND_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID} /opt/signhex/${SITE_NAME} && ln -sfn /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/backend /opt/signhex/${SITE_NAME}/current"
 ssh "${DEPLOY_USER}@${CMS_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID} /opt/signhex/${SITE_NAME} && ln -sfn /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/cms /opt/signhex/${SITE_NAME}/current"
+```
+
+If you built the custom 4-VM bundle:
+
+```bash
+ssh "${DEPLOY_USER}@${OBSERVABILITY_VM_HOST}" "mkdir -p /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID} /opt/signhex/${SITE_NAME} && ln -sfn /opt/signhex/${SITE_NAME}/releases/${RELEASE_ID}/observability /opt/signhex/${SITE_NAME}/current"
 ```
 
 ## 6. Start Each Tier
@@ -343,6 +378,21 @@ Expected result:
 - HTTP redirects to HTTPS
 - HTTPS loads
 
+### Observability VM
+
+Run on the Observability VM when `production/observability/` exists:
+
+```bash
+cd "/opt/signhex/${SITE_NAME}/current"
+./load-images.sh
+./start.sh
+./health-check.sh
+docker compose --env-file .env.production ps
+curl -fsS "http://127.0.0.1:9090/-/ready"
+curl -fsS "http://127.0.0.1:9093/-/ready"
+curl -fsS "http://127.0.0.1:3001/api/health"
+```
+
 ## 7. Post-Deploy Validation
 
 ### Browser checks
@@ -366,6 +416,7 @@ Confirm:
 - API calls succeed
 - live socket-driven areas connect
 - `/grafana/` resolves through the same-origin VM3 reverse proxy after Grafana is started locally on VM3
+- in the custom 4-VM layout, `/grafana/` resolves through the same-origin VM3 reverse proxy to VM4 Grafana
 
 ### API checks
 
@@ -451,6 +502,7 @@ Use:
 - `data` on the Data VM
 - `backend` on the Backend VM
 - `cms` on the CMS guest
+- `observability` on the Observability VM when the custom 4-VM bundle is used
 
 ## 9. Troubleshooting
 
@@ -507,6 +559,7 @@ export CMS_PUBLIC_HOST="10.20.0.30"
 export BACKEND_PRIVATE_HOST="10.20.0.20"
 export BACKEND_DEVICE_HOST="10.20.0.21"
 export DATA_PRIVATE_HOST="10.20.0.10"
+export OBSERVABILITY_PRIVATE_HOST="10.20.0.40"
 bash scripts/export/package-server.sh --release "$RELEASE_ID" --deployment-layout production-split
 bash scripts/export/package-cms.sh --release "$RELEASE_ID"
 
@@ -522,6 +575,7 @@ cd "dist/onprem/$SITE_NAME"
 scp -r "production/data" support@10.20.0.10:/opt/signhex/site-a/releases/2026-03-30-r1/
 scp -r "production/backend" support@10.20.0.20:/opt/signhex/site-a/releases/2026-03-30-r1/
 scp -r "production/cms" support@10.20.0.30:/opt/signhex/site-a/releases/2026-03-30-r1/
+scp -r "production/observability" support@10.20.0.40:/opt/signhex/site-a/releases/2026-03-30-r1/
 ```
 
 Then on each guest:
